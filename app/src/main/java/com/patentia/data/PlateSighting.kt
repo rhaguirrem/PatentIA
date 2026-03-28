@@ -65,6 +65,7 @@ data class SyncDiagnostics(
     val pendingUploadCount: Int = 0,
     val lastSyncAtEpochMillis: Long? = null,
     val lastError: String? = null,
+    val lastWarning: String? = null,
 )
 
 data class SharedGroup(

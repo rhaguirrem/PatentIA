@@ -954,6 +954,9 @@ private fun HistoryRow(
                 )
                 Text("Source: ${sighting.source}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(syncStateLabel(sighting), color = syncStateColor(sighting), fontWeight = FontWeight.SemiBold)
+                sighting.syncError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 if (sighting.syncState == PlateSyncState.SYNC_ERROR.name) {
                     OutlinedButton(onClick = onRetry) {
                         Icon(Icons.Default.Sync, contentDescription = null)
@@ -970,6 +973,7 @@ private fun syncHeadline(syncDiagnostics: SyncDiagnostics, fallbackStatus: Strin
     return when {
         !syncDiagnostics.isConfigured -> "Local-only mode"
         syncDiagnostics.lastError != null -> "Cloud sync delayed"
+        syncDiagnostics.lastWarning != null -> "Shared without cloud image"
         syncDiagnostics.pendingUploadCount > 0 -> "Syncing ${syncDiagnostics.pendingUploadCount} pending"
         syncDiagnostics.isSignedIn -> "Shared group ${syncDiagnostics.activeGroupId ?: "-"}"
         else -> fallbackStatus
@@ -988,6 +992,7 @@ private fun syncTitle(syncDiagnostics: SyncDiagnostics): String {
     return when {
         !syncDiagnostics.isConfigured -> "Stored on this device only"
         syncDiagnostics.lastError != null -> "Cloud sync needs retry"
+        syncDiagnostics.lastWarning != null -> "Shared without cloud image"
         syncDiagnostics.pendingUploadCount > 0 -> "Sync in progress"
         syncDiagnostics.isSignedIn -> "Live shared updates active"
         else -> "Preparing shared session"
@@ -998,6 +1003,7 @@ private fun syncSubtitle(syncDiagnostics: SyncDiagnostics): String {
     return when {
         !syncDiagnostics.isConfigured -> "Add google-services.json to enable Firebase Auth and Firestore."
         syncDiagnostics.lastError != null -> "${syncDiagnostics.lastError} • queued items stay local until retry succeeds."
+        syncDiagnostics.lastWarning != null -> "${syncDiagnostics.lastWarning} Firestore sharing still works, but remote devices will not see the photo until Storage is enabled."
         syncDiagnostics.pendingUploadCount > 0 -> "Queued sightings upload automatically when network and Firebase are available."
         syncDiagnostics.isSignedIn -> buildString {
             append("Signed in as ")
@@ -1023,7 +1029,7 @@ private fun syncStateLabel(sighting: PlateSighting): String {
     return when (sighting.syncState) {
         PlateSyncState.LOCAL_ONLY.name -> "Local only"
         PlateSyncState.PENDING_UPLOAD.name -> "Pending cloud upload"
-        PlateSyncState.SYNCED.name -> "Shared"
+        PlateSyncState.SYNCED.name -> if (sighting.syncError != null) "Shared without image" else "Shared"
         PlateSyncState.SYNC_ERROR.name -> "Sync error"
         else -> sighting.syncState
     }
@@ -1034,7 +1040,7 @@ private fun syncStateColor(sighting: PlateSighting): Color {
     return when (sighting.syncState) {
         PlateSyncState.LOCAL_ONLY.name -> MaterialTheme.colorScheme.secondary
         PlateSyncState.PENDING_UPLOAD.name -> MaterialTheme.colorScheme.primary
-        PlateSyncState.SYNCED.name -> MaterialTheme.colorScheme.primary
+        PlateSyncState.SYNCED.name -> if (sighting.syncError != null) Color(0xFFFFB74D) else MaterialTheme.colorScheme.primary
         PlateSyncState.SYNC_ERROR.name -> Color(0xFFFF8A80)
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }

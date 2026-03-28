@@ -225,6 +225,7 @@ class AppViewModel(
                 when {
                     !syncDiagnostics.isConfigured -> append(" locally only")
                     syncDiagnostics.lastError != null -> append(" with cloud sync pending")
+                    syncDiagnostics.lastWarning != null -> append(" with shared metadata only")
                     else -> append(" to group ${syncDiagnostics.activeGroupId ?: BuildConfig.DEFAULT_FIRESTORE_GROUP_ID}")
                 }
             }

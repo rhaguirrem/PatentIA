@@ -6,6 +6,7 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.firestore
+import com.google.firebase.storage.StorageException
 import com.google.firebase.storage.storage
 import com.patentia.BuildConfig
 import com.patentia.data.PlateSighting
@@ -189,9 +190,10 @@ class FirebaseRemoteSyncDataSource(
                 "createdBy" to session.userId,
                 "plateNumber" to sighting.plateNumber,
                 "rawText" to sighting.rawText,
-                "imageUri" to sighting.imageUri,
+                "imageUri" to uploadedImage.downloadUrl,
                 "imageDownloadUrl" to uploadedImage.downloadUrl,
                 "imageStoragePath" to uploadedImage.storagePath,
+                "imageUploadWarning" to uploadedImage.warningMessage,
                 "latitude" to sighting.latitude,
                 "longitude" to sighting.longitude,
                 "capturedAtEpochMillis" to sighting.capturedAtEpochMillis,
@@ -210,6 +212,7 @@ class FirebaseRemoteSyncDataSource(
                     imageUri = uploadedImage.downloadUrl,
                     imageStoragePath = uploadedImage.storagePath,
                     updatedAtEpochMillis = updatedAtEpochMillis,
+                    warningMessage = uploadedImage.warningMessage,
                 )
             } catch (exception: Exception) {
                 RemoteUploadResult(
@@ -287,9 +290,41 @@ class FirebaseRemoteSyncDataSource(
                 storagePath = storagePath,
             )
         } catch (exception: Exception) {
+            val warningMessage = storageFallbackWarning(exception)
+            if (warningMessage != null) {
+                return UploadedImageResult(warningMessage = warningMessage)
+            }
+
             UploadedImageResult(
                 errorMessage = exception.message ?: "Firebase Storage upload failed",
             )
+        }
+    }
+
+    private fun storageFallbackWarning(exception: Exception): String? {
+        if (exception is StorageException) {
+            return when (exception.errorCode) {
+                StorageException.ERROR_BUCKET_NOT_FOUND,
+                StorageException.ERROR_PROJECT_NOT_FOUND,
+                StorageException.ERROR_QUOTA_EXCEEDED -> {
+                    "Cloud image upload is unavailable; the sighting was shared without its photo."
+                }
+
+                else -> null
+            }
+        }
+
+        val message = exception.message?.lowercase().orEmpty()
+        return if (
+            "billing" in message ||
+            "bucket" in message ||
+            "quota" in message ||
+            "project not found" in message ||
+            "storage is not available" in message
+        ) {
+            "Cloud image upload is unavailable; the sighting was shared without its photo."
+        } else {
+            null
         }
     }
 }
@@ -297,6 +332,7 @@ class FirebaseRemoteSyncDataSource(
 private data class UploadedImageResult(
     val downloadUrl: String? = null,
     val storagePath: String? = null,
+    val warningMessage: String? = null,
     val errorMessage: String? = null,
 ) {
     companion object {

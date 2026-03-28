@@ -66,6 +66,7 @@ data class RemoteUploadResult(
     val imageUri: String? = null,
     val imageStoragePath: String? = null,
     val updatedAtEpochMillis: Long = System.currentTimeMillis(),
+    val warningMessage: String? = null,
     val errorMessage: String? = null,
 )
 

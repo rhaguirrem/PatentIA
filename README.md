@@ -39,7 +39,7 @@ PatentIA is an Android app scaffold written in Kotlin with Jetpack Compose for r
 2. Let Android Studio install the missing Android SDK components.
 3. Add a Google Maps API key in `local.properties` as `MAPS_API_KEY=...`.
 4. Create a Firebase project if you want multi-user sharing.
-5. Enable Anonymous Authentication, Cloud Firestore, and Firebase Storage in Firebase.
+5. Enable Anonymous Authentication and Cloud Firestore in Firebase. Firebase Storage is optional, and the app will fall back to metadata-only sharing when Storage is unavailable.
 6. Add `google-services.json` to `app/google-services.json`. The build is set up to apply the Google services plugin automatically when that file exists.
 7. Generate a Gradle wrapper from Android Studio or from a local Gradle installation.
 8. Run the app on a physical Android device with camera and GPS access.
@@ -49,7 +49,8 @@ PatentIA is an Android app scaffold written in Kotlin with Jetpack Compose for r
 - Room stays the source of truth for the UI.
 - New sightings are stored locally first.
 - If Firebase is configured, those local sightings are marked pending and uploaded to Firestore.
-- If Firebase is configured, local images are uploaded to Firebase Storage before the Firestore document is written.
+- If Firebase Storage is available, local images are uploaded before the Firestore document is written.
+- If Firebase Storage is unavailable, the sighting still syncs to Firestore and the app warns that the shared photo was skipped.
 - A Firestore listener streams shared group sightings back into Room.
 - If Firebase is not configured, the app remains fully local.
 

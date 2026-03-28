@@ -32,7 +32,7 @@ interface PlateSightingDao {
             groupId = :groupId,
             createdBy = :createdBy,
             syncState = :syncState,
-            syncError = NULL,
+            syncError = :syncMessage,
             lastSyncedAtEpochMillis = :lastSyncedAtEpochMillis,
             updatedAtEpochMillis = :updatedAtEpochMillis
         WHERE clientGeneratedId = :clientGeneratedId
@@ -45,6 +45,7 @@ interface PlateSightingDao {
         groupId: String,
         createdBy: String,
         syncState: String,
+        syncMessage: String?,
         lastSyncedAtEpochMillis: Long,
         updatedAtEpochMillis: Long,
     )

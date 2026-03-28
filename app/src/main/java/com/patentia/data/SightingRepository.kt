@@ -137,6 +137,7 @@ class SightingRepository(
                     groupId = result.groupId,
                     createdBy = result.createdBy,
                     syncState = PlateSyncState.SYNCED.name,
+                    syncMessage = result.warningMessage,
                     lastSyncedAtEpochMillis = syncTime,
                     updatedAtEpochMillis = result.updatedAtEpochMillis,
                 )
@@ -150,9 +151,11 @@ class SightingRepository(
         }
 
         val lastError = uploadResults.firstOrNull { it.errorMessage != null }?.errorMessage
+        val lastWarning = uploadResults.firstOrNull { it.warningMessage != null }?.warningMessage
         refreshDiagnostics(
             lastSyncAtEpochMillis = syncTime,
             lastError = lastError,
+            lastWarning = lastWarning,
         )
     }
 
@@ -162,7 +165,7 @@ class SightingRepository(
             syncState = PlateSyncState.PENDING_UPLOAD.name,
             updatedAtEpochMillis = System.currentTimeMillis(),
         )
-        refreshDiagnostics(lastError = null)
+        refreshDiagnostics(lastError = null, lastWarning = null)
         syncPendingSightings(clientGeneratedIds = listOf(clientGeneratedId))
     }
 
@@ -214,6 +217,7 @@ class SightingRepository(
     private suspend fun refreshDiagnostics(
         lastSyncAtEpochMillis: Long? = syncDiagnostics.value.lastSyncAtEpochMillis,
         lastError: String? = syncDiagnostics.value.lastError,
+        lastWarning: String? = syncDiagnostics.value.lastWarning,
     ) {
         val pendingUploadCount = dao.countBySyncStates(
             syncStates = listOf(
@@ -232,6 +236,7 @@ class SightingRepository(
                 pendingUploadCount = pendingUploadCount,
                 lastSyncAtEpochMillis = lastSyncAtEpochMillis,
                 lastError = lastError,
+                lastWarning = lastWarning,
             )
         }
     }
