@@ -201,10 +201,12 @@ class AppViewModel(
                 return@launch
             }
 
+            val primaryPlate = recognition.plates.first()
+
             statusMessage.value = "Getting GPS position"
             val location = currentLocationProvider.getCurrentLocation()
             val savedPlates = repository.saveSightings(
-                recognizedPlates = recognition.plates,
+                recognizedPlates = listOf(primaryPlate),
                 rawText = recognition.rawText,
                 imageUri = imageUri.toString(),
                 latitude = location?.latitude,
@@ -279,6 +281,14 @@ class AppViewModel(
             statusMessage.value = "Joining shared group"
             repository.joinOrCreateGroup(groupId)
             statusMessage.value = "Group ready: $groupId"
+        }
+    }
+
+    fun removeLocalImage(clientGeneratedId: String, imageUri: String?) {
+        viewModelScope.launch {
+            statusMessage.value = "Removing local image"
+            repository.removeLocalImage(clientGeneratedId, imageUri)
+            statusMessage.value = "Local image removed"
         }
     }
 

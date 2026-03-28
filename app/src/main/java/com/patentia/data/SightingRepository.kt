@@ -1,5 +1,6 @@
 package com.patentia.data
 
+import android.net.Uri
 import com.patentia.data.remote.RemoteSightingSyncDataSource
 import com.patentia.data.remote.RemoteSyncSession
 import com.patentia.data.remote.toLocalEntity
@@ -186,6 +187,23 @@ class SightingRepository(
         val session = if (activeSession.isAvailable) activeSession else remoteSyncDataSource.ensureSession(activeSession.groupId)
         val joinedGroup = remoteSyncDataSource.joinOrCreateGroup(session, groupId)
         switchActiveGroup(joinedGroup.id)
+    }
+
+    suspend fun removeLocalImage(clientGeneratedId: String, imageUri: String?) {
+        imageUri?.let { uriString ->
+            val uri = runCatching { Uri.parse(uriString) }.getOrNull()
+            if (uri != null && uri.scheme == "file") {
+                runCatching {
+                    val path = uri.path ?: return@runCatching
+                    java.io.File(path).takeIf { it.exists() }?.delete()
+                }
+            }
+        }
+
+        dao.clearImageUri(
+            clientGeneratedId = clientGeneratedId,
+            updatedAtEpochMillis = System.currentTimeMillis(),
+        )
     }
 
     private fun restartRealtimeSync() {

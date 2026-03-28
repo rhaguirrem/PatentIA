@@ -3,6 +3,7 @@ package com.patentia.ui
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.view.ScaleGestureDetector
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -13,6 +14,7 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -43,6 +46,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sync
@@ -56,7 +60,6 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -65,6 +68,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.window.Dialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -114,8 +118,9 @@ import kotlinx.coroutines.launch
 private enum class AppPanel(val label: String) {
     Camera("Camera"),
     Map("Map"),
-    Roadside("Roadside"),
+    Cloudsync("Cloudsync"),
     History("History"),
+    About("About"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -219,7 +224,9 @@ fun PatentIAApp(viewModel: AppViewModel) {
 
                         HorizontalPager(
                             state = pagerState,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .weight(1f, fill = true)
+                                .fillMaxWidth(),
                             beyondViewportPageCount = 1,
                         ) { page ->
                             when (AppPanel.entries[page]) {
@@ -241,12 +248,9 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                     onSelectPlate = viewModel::selectPlate,
                                 )
 
-                                AppPanel.Roadside -> RoadsidePanel(
+                                AppPanel.Cloudsync -> CloudSyncPanel(
                                     modifier = Modifier.fillMaxSize(),
                                     uiState = uiState,
-                                    hasCameraPermission = hasCameraPermission,
-                                    hasLocationPermission = hasLocationPermission,
-                                    onSelectPlate = viewModel::selectPlate,
                                     onSwitchGroup = viewModel::switchActiveGroup,
                                     onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
                                     onRetryPendingSync = viewModel::retryPendingSync,
@@ -265,6 +269,15 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                         }
                                     },
                                     onRetrySighting = viewModel::retrySighting,
+                                    onDeleteLocalImage = viewModel::removeLocalImage,
+                                )
+
+                                AppPanel.About -> AboutPanel(
+                                    modifier = Modifier.fillMaxSize(),
+                                    uiState = uiState,
+                                    hasCameraPermission = hasCameraPermission,
+                                    hasLocationPermission = hasLocationPermission,
+                                    onSelectPlate = viewModel::selectPlate,
                                 )
                             }
                         }
@@ -355,15 +368,35 @@ private fun CameraPanel(
 }
 
 @Composable
-private fun RoadsidePanel(
+private fun CloudSyncPanel(
+    modifier: Modifier = Modifier,
+    uiState: AppUiState,
+    onSwitchGroup: (String) -> Unit,
+    onJoinOrCreateGroup: (String) -> Unit,
+    onRetryPendingSync: () -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        SyncStatusCard(
+            syncDiagnostics = uiState.syncDiagnostics,
+            onRetryPendingSync = onRetryPendingSync,
+            onSwitchGroup = onSwitchGroup,
+            onJoinOrCreateGroup = onJoinOrCreateGroup,
+        )
+    }
+}
+
+@Composable
+private fun AboutPanel(
     modifier: Modifier = Modifier,
     uiState: AppUiState,
     hasCameraPermission: Boolean,
     hasLocationPermission: Boolean,
     onSelectPlate: (String?) -> Unit,
-    onSwitchGroup: (String) -> Unit,
-    onJoinOrCreateGroup: (String) -> Unit,
-    onRetryPendingSync: () -> Unit,
 ) {
     Column(
         modifier = modifier
@@ -376,12 +409,6 @@ private fun RoadsidePanel(
             syncDiagnostics = uiState.syncDiagnostics,
             hasCameraPermission = hasCameraPermission,
             hasLocationPermission = hasLocationPermission,
-        )
-        SyncStatusCard(
-            syncDiagnostics = uiState.syncDiagnostics,
-            onRetryPendingSync = onRetryPendingSync,
-            onSwitchGroup = onSwitchGroup,
-            onJoinOrCreateGroup = onJoinOrCreateGroup,
         )
     }
 }
@@ -582,11 +609,14 @@ private fun CaptureControls(
 ) {
     Card(shape = RoundedCornerShape(24.dp)) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Capture mode", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 FilterChip(
                     selected = uiState.captureMode == CaptureMode.SINGLE,
                     onClick = { onCaptureModeChange(CaptureMode.SINGLE) },
@@ -597,6 +627,10 @@ private fun CaptureControls(
                     onClick = { onCaptureModeChange(CaptureMode.INTERVAL) },
                     label = { Text("Interval") },
                 )
+                Spacer(Modifier.weight(1f))
+                OutlinedButton(onClick = onPickImage) {
+                    Icon(Icons.Default.PhotoLibrary, contentDescription = "Open image")
+                }
             }
             if (uiState.captureMode == CaptureMode.INTERVAL) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -610,9 +644,6 @@ private fun CaptureControls(
                         Text(if (uiState.intervalRunning) "Stop interval" else "Start interval")
                     }
                 }
-            }
-            OutlinedButton(onClick = onPickImage) {
-                Text("Import existing image")
             }
         }
     }
@@ -629,14 +660,27 @@ private fun CameraCaptureCard(
     val previewView = remember { PreviewView(context) }
     var cameraErrorMessage by remember { mutableStateOf<String?>(null) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
-    var zoomRatio by rememberSaveable { mutableStateOf(1f) }
-    var maxZoomRatio by remember { mutableStateOf(4f) }
     val imageCapture = remember {
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
     }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val scaleGestureDetector = remember {
+        ScaleGestureDetector(
+            context,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val camera = boundCamera ?: return false
+                    val zoomState = camera.cameraInfo.zoomState.value ?: return false
+                    val nextZoomRatio = (zoomState.zoomRatio * detector.scaleFactor)
+                        .coerceIn(1f, zoomState.maxZoomRatio)
+                    camera.cameraControl.setZoomRatio(nextZoomRatio)
+                    return true
+                }
+            },
+        )
+    }
 
     DisposableEffect(lifecycleOwner) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
@@ -654,9 +698,6 @@ private fun CameraCaptureCard(
                     imageCapture,
                 )
                 boundCamera = camera
-                val zoomState = camera.cameraInfo.zoomState.value
-                maxZoomRatio = zoomState?.maxZoomRatio?.coerceAtLeast(1f) ?: 4f
-                zoomRatio = zoomState?.zoomRatio ?: 1f
                 cameraErrorMessage = null
             } catch (exception: Exception) {
                 boundCamera = null
@@ -685,10 +726,6 @@ private fun CameraCaptureCard(
         }
     }
 
-    LaunchedEffect(zoomRatio, boundCamera) {
-        boundCamera?.cameraControl?.setZoomRatio(zoomRatio)
-    }
-
     Card(
         shape = RoundedCornerShape(28.dp),
         modifier = modifier.fillMaxWidth(),
@@ -705,52 +742,38 @@ private fun CameraCaptureCard(
             ) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
-                    factory = { previewView },
+                    factory = {
+                        previewView.apply {
+                            setOnTouchListener { _, event ->
+                                scaleGestureDetector.onTouchEvent(event)
+                                true
+                            }
+                        }
+                    },
                 )
 
-                Card(
+                FloatingActionButton(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    shape = RoundedCornerShape(22.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xCC0D1E2A)),
+                        .padding(bottom = 18.dp)
+                        .size(88.dp),
+                    shape = CircleShape,
+                    onClick = {
+                        capturePhoto(
+                            context = context,
+                            imageCapture = imageCapture,
+                            executor = cameraExecutor,
+                            source = "camera_manual",
+                            onImageCaptured = onImageCaptured,
+                            onCaptureError = { message -> cameraErrorMessage = message },
+                        )
+                    },
                 ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        Text(
-                            text = "Zoom ${String.format("%.1f", zoomRatio)}x",
-                            color = Color.White,
-                        )
-                        Slider(
-                            modifier = Modifier.width(220.dp),
-                            value = zoomRatio,
-                            onValueChange = { zoomRatio = it },
-                            valueRange = 1f..maxZoomRatio,
-                        )
-                        FloatingActionButton(
-                            modifier = Modifier.size(88.dp),
-                            shape = CircleShape,
-                            onClick = {
-                                capturePhoto(
-                                    context = context,
-                                    imageCapture = imageCapture,
-                                    executor = cameraExecutor,
-                                    source = "camera_manual",
-                                    onImageCaptured = onImageCaptured,
-                                    onCaptureError = { message -> cameraErrorMessage = message },
-                                )
-                            },
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CameraAlt,
-                                contentDescription = "Capture",
-                                modifier = Modifier.size(36.dp),
-                            )
-                        }
-                    }
+                    Icon(
+                        imageVector = Icons.Default.CameraAlt,
+                        contentDescription = "Capture",
+                        modifier = Modifier.size(36.dp),
+                    )
                 }
             }
             Column(
@@ -758,7 +781,7 @@ private fun CameraCaptureCard(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Text(
-                    text = "Tip: keep the plate centered and reduce glare for better OCR.",
+                    text = "Tip: keep the plate centered, pinch with two fingers to zoom, and reduce glare for better OCR.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 cameraErrorMessage?.let { message ->
@@ -784,6 +807,7 @@ private fun MapScreen(
     val mappedSightings = uiState.filteredSightings.filter { it.latitude != null && it.longitude != null }
     val selectedPath = uiState.selectedPlateHistory.filter { it.latitude != null && it.longitude != null }
     var controlsVisible by rememberSaveable { mutableStateOf(false) }
+    val isMapsConfigured = BuildConfig.IS_MAPS_API_KEY_CONFIGURED
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(48.8566, 2.3522), 10f)
     }
@@ -807,42 +831,61 @@ private fun MapScreen(
             shape = RoundedCornerShape(28.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            GoogleMap(
-                modifier = Modifier.fillMaxSize(),
-                cameraPositionState = cameraPositionState,
-            ) {
-                mappedSightings.forEach { sighting ->
-                    val latitude = sighting.latitude ?: return@forEach
-                    val longitude = sighting.longitude ?: return@forEach
-                    Marker(
-                        state = MarkerState(position = LatLng(latitude, longitude)),
-                        title = sighting.plateNumber,
-                        snippet = formatTimestamp(sighting.capturedAtEpochMillis),
-                        onClick = {
-                            onSelectPlate(sighting.plateNumber)
-                            false
-                        },
-                    )
-                }
+            if (isMapsConfigured) {
+                GoogleMap(
+                    modifier = Modifier.fillMaxSize(),
+                    cameraPositionState = cameraPositionState,
+                ) {
+                    mappedSightings.forEach { sighting ->
+                        val latitude = sighting.latitude ?: return@forEach
+                        val longitude = sighting.longitude ?: return@forEach
+                        Marker(
+                            state = MarkerState(position = LatLng(latitude, longitude)),
+                            title = sighting.plateNumber,
+                            snippet = formatTimestamp(sighting.capturedAtEpochMillis),
+                            onClick = {
+                                onSelectPlate(sighting.plateNumber)
+                                false
+                            },
+                        )
+                    }
 
-                if (selectedPath.size >= 2) {
-                    Polyline(
-                        points = selectedPath.map { LatLng(it.latitude ?: return@map LatLng(0.0, 0.0), it.longitude ?: return@map LatLng(0.0, 0.0)) },
-                        color = MaterialTheme.colorScheme.primary,
-                        width = 8f,
-                    )
-                }
+                    if (selectedPath.size >= 2) {
+                        Polyline(
+                            points = selectedPath.map { LatLng(it.latitude ?: return@map LatLng(0.0, 0.0), it.longitude ?: return@map LatLng(0.0, 0.0)) },
+                            color = MaterialTheme.colorScheme.primary,
+                            width = 8f,
+                        )
+                    }
 
-                selectedPath.lastOrNull()?.let { last ->
-                    val latitude = last.latitude ?: return@let
-                    val longitude = last.longitude ?: return@let
-                    if (uiState.theoreticalRadiusMeters > 0.0) {
-                        Circle(
-                            center = LatLng(latitude, longitude),
-                            radius = uiState.theoreticalRadiusMeters,
-                            fillColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f),
-                            strokeColor = MaterialTheme.colorScheme.secondary,
-                            strokeWidth = 4f,
+                    selectedPath.lastOrNull()?.let { last ->
+                        val latitude = last.latitude ?: return@let
+                        val longitude = last.longitude ?: return@let
+                        if (uiState.theoreticalRadiusMeters > 0.0) {
+                            Circle(
+                                center = LatLng(latitude, longitude),
+                                radius = uiState.theoreticalRadiusMeters,
+                                fillColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f),
+                                strokeColor = MaterialTheme.colorScheme.secondary,
+                                strokeWidth = 4f,
+                            )
+                        }
+                    }
+                }
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text("Map unavailable", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(
+                            "The Google Maps API key is not configured in this build, so street tiles cannot load.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -938,7 +981,10 @@ private fun HistoryScreen(
     onSelectPlate: (String?) -> Unit,
     onShareSelected: () -> Unit,
     onRetrySighting: (String) -> Unit,
+    onDeleteLocalImage: (String, String?) -> Unit,
 ) {
+    var fullScreenImageUri by rememberSaveable { mutableStateOf<String?>(null) }
+
     Column(
         modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -984,9 +1030,23 @@ private fun HistoryScreen(
                     sighting = sighting,
                     onClick = { onSelectPlate(sighting.plateNumber) },
                     onRetry = { onRetrySighting(sighting.clientGeneratedId) },
+                    onOpenImage = { imageUri -> fullScreenImageUri = imageUri },
+                    onDeleteImage = {
+                        onDeleteLocalImage(sighting.clientGeneratedId, sighting.imageUri)
+                        if (fullScreenImageUri == sighting.imageUri) {
+                            fullScreenImageUri = null
+                        }
+                    },
                 )
             }
         }
+    }
+
+    fullScreenImageUri?.let { imageUri ->
+        FullScreenImageDialog(
+            imageUri = imageUri,
+            onDismiss = { fullScreenImageUri = null },
+        )
     }
 }
 
@@ -1040,6 +1100,8 @@ private fun HistoryRow(
     sighting: PlateSighting,
     onClick: () -> Unit,
     onRetry: () -> Unit,
+    onOpenImage: (String) -> Unit,
+    onDeleteImage: () -> Unit,
 ) {
     Card(
         onClick = onClick,
@@ -1058,7 +1120,8 @@ private fun HistoryRow(
                     contentDescription = sighting.plateNumber,
                     modifier = Modifier
                         .size(92.dp)
-                        .heightIn(min = 92.dp),
+                        .heightIn(min = 92.dp)
+                        .clickable { onOpenImage(sighting.imageUri) },
                     contentScale = ContentScale.Crop,
                 )
             } else {
@@ -1089,6 +1152,11 @@ private fun HistoryRow(
                 sighting.syncError?.let {
                     Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                if (isLocalImageUri(sighting.imageUri)) {
+                    TextButton(onClick = onDeleteImage) {
+                        Text("Delete local image")
+                    }
+                }
                 if (sighting.syncState == PlateSyncState.SYNC_ERROR.name) {
                     OutlinedButton(onClick = onRetry) {
                         Icon(Icons.Default.Sync, contentDescription = null)
@@ -1099,6 +1167,44 @@ private fun HistoryRow(
             }
         }
     }
+}
+
+@Composable
+private fun FullScreenImageDialog(
+    imageUri: String,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable(onClick = onDismiss)
+                .navigationBarsPadding(),
+        ) {
+            AsyncImage(
+                model = imageUri,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+            TextButton(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(12.dp),
+                onClick = onDismiss,
+            ) {
+                Text("Close")
+            }
+        }
+    }
+}
+
+private fun isLocalImageUri(imageUri: String?): Boolean {
+    if (imageUri.isNullOrBlank()) {
+        return false
+    }
+    return !(imageUri.startsWith("https://") || imageUri.startsWith("gs://"))
 }
 
 private fun syncHeadline(syncDiagnostics: SyncDiagnostics, fallbackStatus: String): String {

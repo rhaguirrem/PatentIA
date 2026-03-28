@@ -78,4 +78,17 @@ interface PlateSightingDao {
         syncState: String,
         updatedAtEpochMillis: Long,
     )
+
+    @Query(
+        """
+        UPDATE plate_sightings
+        SET imageUri = NULL,
+            updatedAtEpochMillis = :updatedAtEpochMillis
+        WHERE clientGeneratedId = :clientGeneratedId
+        """
+    )
+    suspend fun clearImageUri(
+        clientGeneratedId: String,
+        updatedAtEpochMillis: Long,
+    )
 }
