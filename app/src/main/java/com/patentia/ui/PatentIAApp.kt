@@ -6,12 +6,14 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.Camera
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +29,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -68,6 +72,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -104,18 +109,21 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
-private enum class AppTab {
-    Capture,
-    Map,
-    History,
+private enum class AppPanel(val label: String) {
+    Camera("Camera"),
+    Map("Map"),
+    Roadside("Roadside"),
+    History("History"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PatentIAApp(viewModel: AppViewModel) {
     val uiState by viewModel.uiState.collectAsState()
-    var selectedTab by rememberSaveable { mutableStateOf(AppTab.Capture) }
+    val pagerState = rememberPagerState(pageCount = { AppPanel.entries.size })
+    val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var permissionRefreshToken by remember { mutableStateOf(0) }
@@ -165,28 +173,6 @@ fun PatentIAApp(viewModel: AppViewModel) {
                         }
                     )
                 },
-                bottomBar = {
-                    NavigationBar {
-                        NavigationBarItem(
-                            selected = selectedTab == AppTab.Capture,
-                            onClick = { selectedTab = AppTab.Capture },
-                            icon = { Icon(Icons.Default.CameraAlt, contentDescription = null) },
-                            label = { Text("Capture") },
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == AppTab.Map,
-                            onClick = { selectedTab = AppTab.Map },
-                            icon = { Icon(Icons.Default.Route, contentDescription = null) },
-                            label = { Text("Map") },
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == AppTab.History,
-                            onClick = { selectedTab = AppTab.History },
-                            icon = { Icon(Icons.Default.MyLocation, contentDescription = null) },
-                            label = { Text("History") },
-                        )
-                    }
-                },
             ) { innerPadding ->
                 if (!hasCameraPermission || !hasLocationPermission) {
                     PermissionGate(
@@ -206,55 +192,82 @@ fun PatentIAApp(viewModel: AppViewModel) {
                         },
                     )
                 } else {
-                    when (selectedTab) {
-                        AppTab.Capture -> CaptureScreen(
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding),
+                    ) {
+                        Row(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(innerPadding),
-                            uiState = uiState,
-                            hasCameraPermission = hasCameraPermission,
-                            hasLocationPermission = hasLocationPermission,
-                            onCaptureModeChange = viewModel::setCaptureMode,
-                            onIntervalSecondsChange = viewModel::setIntervalSeconds,
-                            onToggleInterval = viewModel::toggleIntervalCapture,
-                            onImageCaptured = viewModel::processImage,
-                            onSelectPlate = viewModel::selectPlate,
-                            onSwitchGroup = viewModel::switchActiveGroup,
-                            onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
-                            onRetryPendingSync = viewModel::retryPendingSync,
-                        )
-                        AppTab.Map -> MapScreen(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(innerPadding),
-                            uiState = uiState,
-                            onSearchChange = viewModel::updateSearchQuery,
-                            onRepeatedOnlyChange = viewModel::setRepeatedOnly,
-                            onTimeFilterChange = viewModel::setTimeFilter,
-                            onSelectPlate = viewModel::selectPlate,
-                            onSwitchGroup = viewModel::switchActiveGroup,
-                            onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
-                            onRetryPendingSync = viewModel::retryPendingSync,
-                        )
-                        AppTab.History -> HistoryScreen(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(innerPadding),
-                            uiState = uiState,
-                            onSearchChange = viewModel::updateSearchQuery,
-                            onRepeatedOnlyChange = viewModel::setRepeatedOnly,
-                            onTimeFilterChange = viewModel::setTimeFilter,
-                            onSelectPlate = viewModel::selectPlate,
-                            onSwitchGroup = viewModel::switchActiveGroup,
-                            onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
-                            onRetryPendingSync = viewModel::retryPendingSync,
-                            onShareSelected = {
-                                viewModel.buildSelectedPlateSharePayload()?.let { payload ->
-                                    shareText(context, payload)
-                                }
-                            },
-                            onRetrySighting = viewModel::retrySighting,
-                        )
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            AppPanel.entries.forEachIndexed { index, panel ->
+                                FilterChip(
+                                    selected = pagerState.currentPage == index,
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            pagerState.animateScrollToPage(index)
+                                        }
+                                    },
+                                    label = { Text(panel.label) },
+                                )
+                            }
+                        }
+
+                        HorizontalPager(
+                            state = pagerState,
+                            modifier = Modifier.fillMaxSize(),
+                            beyondViewportPageCount = 1,
+                        ) { page ->
+                            when (AppPanel.entries[page]) {
+                                AppPanel.Camera -> CameraPanel(
+                                    modifier = Modifier.fillMaxSize(),
+                                    uiState = uiState,
+                                    onCaptureModeChange = viewModel::setCaptureMode,
+                                    onIntervalSecondsChange = viewModel::setIntervalSeconds,
+                                    onToggleInterval = viewModel::toggleIntervalCapture,
+                                    onImageCaptured = viewModel::processImage,
+                                )
+
+                                AppPanel.Map -> MapScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    uiState = uiState,
+                                    onSearchChange = viewModel::updateSearchQuery,
+                                    onRepeatedOnlyChange = viewModel::setRepeatedOnly,
+                                    onTimeFilterChange = viewModel::setTimeFilter,
+                                    onSelectPlate = viewModel::selectPlate,
+                                )
+
+                                AppPanel.Roadside -> RoadsidePanel(
+                                    modifier = Modifier.fillMaxSize(),
+                                    uiState = uiState,
+                                    hasCameraPermission = hasCameraPermission,
+                                    hasLocationPermission = hasLocationPermission,
+                                    onSelectPlate = viewModel::selectPlate,
+                                    onSwitchGroup = viewModel::switchActiveGroup,
+                                    onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
+                                    onRetryPendingSync = viewModel::retryPendingSync,
+                                )
+
+                                AppPanel.History -> HistoryScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    uiState = uiState,
+                                    onSearchChange = viewModel::updateSearchQuery,
+                                    onRepeatedOnlyChange = viewModel::setRepeatedOnly,
+                                    onTimeFilterChange = viewModel::setTimeFilter,
+                                    onSelectPlate = viewModel::selectPlate,
+                                    onShareSelected = {
+                                        viewModel.buildSelectedPlateSharePayload()?.let { payload ->
+                                            shareText(context, payload)
+                                        }
+                                    },
+                                    onRetrySighting = viewModel::retrySighting,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -304,19 +317,13 @@ private fun PermissionGate(
 }
 
 @Composable
-private fun CaptureScreen(
+private fun CameraPanel(
     modifier: Modifier = Modifier,
     uiState: AppUiState,
-    hasCameraPermission: Boolean,
-    hasLocationPermission: Boolean,
     onCaptureModeChange: (CaptureMode) -> Unit,
     onIntervalSecondsChange: (Int) -> Unit,
     onToggleInterval: () -> Unit,
     onImageCaptured: (Uri, String) -> Unit,
-    onSelectPlate: (String?) -> Unit,
-    onSwitchGroup: (String) -> Unit,
-    onJoinOrCreateGroup: (String) -> Unit,
-    onRetryPendingSync: () -> Unit,
 ) {
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
@@ -329,22 +336,9 @@ private fun CaptureScreen(
 
     Column(
         modifier = modifier
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        DriverSummaryCard(uiState = uiState, onSelectPlate = onSelectPlate)
-        SyncStatusCard(
-            syncDiagnostics = uiState.syncDiagnostics,
-            onRetryPendingSync = onRetryPendingSync,
-            onSwitchGroup = onSwitchGroup,
-            onJoinOrCreateGroup = onJoinOrCreateGroup,
-        )
-        SetupChecklistCard(
-            syncDiagnostics = uiState.syncDiagnostics,
-            hasCameraPermission = hasCameraPermission,
-            hasLocationPermission = hasLocationPermission,
-        )
         CaptureControls(
             uiState = uiState,
             onCaptureModeChange = onCaptureModeChange,
@@ -353,8 +347,41 @@ private fun CaptureScreen(
             onPickImage = { imagePickerLauncher.launch("image/*") },
         )
         CameraCaptureCard(
+            modifier = Modifier.weight(1f, fill = true),
             uiState = uiState,
             onImageCaptured = onImageCaptured,
+        )
+    }
+}
+
+@Composable
+private fun RoadsidePanel(
+    modifier: Modifier = Modifier,
+    uiState: AppUiState,
+    hasCameraPermission: Boolean,
+    hasLocationPermission: Boolean,
+    onSelectPlate: (String?) -> Unit,
+    onSwitchGroup: (String) -> Unit,
+    onJoinOrCreateGroup: (String) -> Unit,
+    onRetryPendingSync: () -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        DriverSummaryCard(uiState = uiState, onSelectPlate = onSelectPlate)
+        SetupChecklistCard(
+            syncDiagnostics = uiState.syncDiagnostics,
+            hasCameraPermission = hasCameraPermission,
+            hasLocationPermission = hasLocationPermission,
+        )
+        SyncStatusCard(
+            syncDiagnostics = uiState.syncDiagnostics,
+            onRetryPendingSync = onRetryPendingSync,
+            onSwitchGroup = onSwitchGroup,
+            onJoinOrCreateGroup = onJoinOrCreateGroup,
         )
     }
 }
@@ -593,6 +620,7 @@ private fun CaptureControls(
 
 @Composable
 private fun CameraCaptureCard(
+    modifier: Modifier = Modifier,
     uiState: AppUiState,
     onImageCaptured: (Uri, String) -> Unit,
 ) {
@@ -600,6 +628,9 @@ private fun CameraCaptureCard(
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember { PreviewView(context) }
     var cameraErrorMessage by remember { mutableStateOf<String?>(null) }
+    var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var zoomRatio by rememberSaveable { mutableStateOf(1f) }
+    var maxZoomRatio by remember { mutableStateOf(4f) }
     val imageCapture = remember {
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
@@ -616,14 +647,19 @@ private fun CameraCaptureCard(
             }
             try {
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
+                val camera = cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     preview,
                     imageCapture,
                 )
+                boundCamera = camera
+                val zoomState = camera.cameraInfo.zoomState.value
+                maxZoomRatio = zoomState?.maxZoomRatio?.coerceAtLeast(1f) ?: 4f
+                zoomRatio = zoomState?.zoomRatio ?: 1f
                 cameraErrorMessage = null
             } catch (exception: Exception) {
+                boundCamera = null
                 cameraErrorMessage = exception.message ?: "Unable to open the camera on this device"
             }
         }
@@ -649,48 +685,88 @@ private fun CameraCaptureCard(
         }
     }
 
-    Card(shape = RoundedCornerShape(28.dp)) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(modifier = Modifier.height(420.dp)) {
+    LaunchedEffect(zoomRatio, boundCamera) {
+        boundCamera?.cameraControl?.setZoomRatio(zoomRatio)
+    }
+
+    Card(
+        shape = RoundedCornerShape(28.dp),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = true)
+                    .heightIn(min = 420.dp),
+            ) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { previewView },
                 )
-                FloatingActionButton(
+
+                Card(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 20.dp)
-                        .size(88.dp),
-                    shape = CircleShape,
-                    onClick = {
-                        capturePhoto(
-                            context = context,
-                            imageCapture = imageCapture,
-                            executor = cameraExecutor,
-                            source = "camera_manual",
-                            onImageCaptured = onImageCaptured,
-                            onCaptureError = { message -> cameraErrorMessage = message },
-                        )
-                    },
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xCC0D1E2A)),
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.CameraAlt,
-                        contentDescription = "Capture",
-                        modifier = Modifier.size(36.dp),
-                    )
+                    Column(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(
+                            text = "Zoom ${String.format("%.1f", zoomRatio)}x",
+                            color = Color.White,
+                        )
+                        Slider(
+                            modifier = Modifier.width(220.dp),
+                            value = zoomRatio,
+                            onValueChange = { zoomRatio = it },
+                            valueRange = 1f..maxZoomRatio,
+                        )
+                        FloatingActionButton(
+                            modifier = Modifier.size(88.dp),
+                            shape = CircleShape,
+                            onClick = {
+                                capturePhoto(
+                                    context = context,
+                                    imageCapture = imageCapture,
+                                    executor = cameraExecutor,
+                                    source = "camera_manual",
+                                    onImageCaptured = onImageCaptured,
+                                    onCaptureError = { message -> cameraErrorMessage = message },
+                                )
+                            },
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = "Capture",
+                                modifier = Modifier.size(36.dp),
+                            )
+                        }
+                    }
                 }
             }
-            Text(
-                text = "Tip: keep the plate centered and reduce glare for better OCR.",
+            Column(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            cameraErrorMessage?.let { message ->
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 Text(
-                    text = message,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    color = Color(0xFFFF8A80),
+                    text = "Tip: keep the plate centered and reduce glare for better OCR.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                cameraErrorMessage?.let { message ->
+                    Text(
+                        text = message,
+                        color = Color(0xFFFF8A80),
+                    )
+                }
             }
         }
     }
@@ -704,12 +780,10 @@ private fun MapScreen(
     onRepeatedOnlyChange: (Boolean) -> Unit,
     onTimeFilterChange: (TimeFilter) -> Unit,
     onSelectPlate: (String?) -> Unit,
-    onSwitchGroup: (String) -> Unit,
-    onJoinOrCreateGroup: (String) -> Unit,
-    onRetryPendingSync: () -> Unit,
 ) {
     val mappedSightings = uiState.filteredSightings.filter { it.latitude != null && it.longitude != null }
     val selectedPath = uiState.selectedPlateHistory.filter { it.latitude != null && it.longitude != null }
+    var controlsVisible by rememberSaveable { mutableStateOf(false) }
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(48.8566, 2.3522), 10f)
     }
@@ -726,23 +800,13 @@ private fun MapScreen(
         }
     }
 
-    Column(
+    Box(
         modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SyncStatusCard(
-            syncDiagnostics = uiState.syncDiagnostics,
-            onRetryPendingSync = onRetryPendingSync,
-            onSwitchGroup = onSwitchGroup,
-            onJoinOrCreateGroup = onJoinOrCreateGroup,
-        )
-        FilterPanel(
-            uiState = uiState,
-            onSearchChange = onSearchChange,
-            onRepeatedOnlyChange = onRepeatedOnlyChange,
-            onTimeFilterChange = onTimeFilterChange,
-        )
-        Card(shape = RoundedCornerShape(28.dp), modifier = Modifier.weight(1f, fill = true)) {
+        Card(
+            shape = RoundedCornerShape(28.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
             GoogleMap(
                 modifier = Modifier.fillMaxSize(),
                 cameraPositionState = cameraPositionState,
@@ -784,6 +848,83 @@ private fun MapScreen(
                 }
             }
         }
+
+        if (mappedSightings.isEmpty()) {
+            Card(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                ),
+                shape = RoundedCornerShape(20.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("No mapped sightings yet", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Capture a plate with GPS, or open controls to adjust filters and group selection.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (controlsVisible) {
+            Card(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(12.dp)
+                    .heightIn(max = 340.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+                ),
+                shape = RoundedCornerShape(24.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Map controls", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text(
+                                "${mappedSightings.size} visible markers",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(onClick = { controlsVisible = false }) {
+                            Text("Close")
+                        }
+                    }
+
+                    FilterPanel(
+                        uiState = uiState,
+                        onSearchChange = onSearchChange,
+                        onRepeatedOnlyChange = onRepeatedOnlyChange,
+                        onTimeFilterChange = onTimeFilterChange,
+                    )
+                }
+            }
+        }
+
+        AssistChip(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp),
+            onClick = { controlsVisible = !controlsVisible },
+            label = { Text(if (controlsVisible) "Hide controls" else "Show controls") },
+            leadingIcon = { Icon(Icons.Default.Route, contentDescription = null) },
+        )
     }
 }
 
@@ -795,9 +936,6 @@ private fun HistoryScreen(
     onRepeatedOnlyChange: (Boolean) -> Unit,
     onTimeFilterChange: (TimeFilter) -> Unit,
     onSelectPlate: (String?) -> Unit,
-    onSwitchGroup: (String) -> Unit,
-    onJoinOrCreateGroup: (String) -> Unit,
-    onRetryPendingSync: () -> Unit,
     onShareSelected: () -> Unit,
     onRetrySighting: (String) -> Unit,
 ) {
@@ -805,12 +943,6 @@ private fun HistoryScreen(
         modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SyncStatusCard(
-            syncDiagnostics = uiState.syncDiagnostics,
-            onRetryPendingSync = onRetryPendingSync,
-            onSwitchGroup = onSwitchGroup,
-            onJoinOrCreateGroup = onJoinOrCreateGroup,
-        )
         FilterPanel(
             uiState = uiState,
             onSearchChange = onSearchChange,
