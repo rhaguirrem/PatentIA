@@ -3,6 +3,9 @@ name: Android Release
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -17,9 +20,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Validate required signing secrets
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -33,14 +33,23 @@ jobs:
           test -n "$ANDROID_KEY_PASSWORD"
 
       - name: Create local properties
+        env:
+          MAPS_API_KEY_SECRET: ${{ secrets.MAPS_API_KEY }}
         run: |
+          MAPS_API_KEY_VALUE="$MAPS_API_KEY_SECRET"
+          if [ -z "$MAPS_API_KEY_VALUE" ]; then
+            MAPS_API_KEY_VALUE="REPLACE_WITH_MAPS_API_KEY"
+          fi
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          echo "MAPS_API_KEY=${{ secrets.MAPS_API_KEY || 'REPLACE_WITH_MAPS_API_KEY' }}" >> local.properties
+          echo "MAPS_API_KEY=$MAPS_API_KEY_VALUE" >> local.properties
 
       - name: Restore Firebase config when available
-        if: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 != '' }}
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
-          echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > app/google-services.json
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > app/google-services.json
+          fi
 
       - name: Decode release keystore
         env:
