@@ -26,6 +26,12 @@ jobs:
       - name: Create local properties
         run: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "MAPS_API_KEY=${{ secrets.MAPS_API_KEY || 'REPLACE_WITH_MAPS_API_KEY' }}" >> local.properties
+
+      - name: Restore Firebase config when available
+        if: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 != '' }}
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > app/google-services.json
 
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew

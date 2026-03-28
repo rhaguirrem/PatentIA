@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -19,8 +20,37 @@ if (localPropertiesFile.exists()) {
     }
 }
 
-val mapsApiKey = localProperties.getProperty("MAPS_API_KEY", "REPLACE_WITH_MAPS_API_KEY")
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use {
+        keystoreProperties.load(it)
+    }
+}
+
+fun readConfig(name: String, fallback: String? = null): String? {
+    return System.getenv(name)?.takeIf { it.isNotBlank() }
+        ?: keystoreProperties.getProperty(name)?.takeIf { it.isNotBlank() }
+        ?: localProperties.getProperty(name)?.takeIf { it.isNotBlank() }
+        ?: fallback
+}
+
+val mapsApiKey = readConfig("MAPS_API_KEY", "REPLACE_WITH_MAPS_API_KEY") ?: "REPLACE_WITH_MAPS_API_KEY"
 val isMapsApiKeyConfigured = mapsApiKey.isNotBlank() && mapsApiKey != "REPLACE_WITH_MAPS_API_KEY"
+val releaseKeystorePath = readConfig("ANDROID_KEYSTORE_PATH")
+val releaseKeystorePassword = readConfig("ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = readConfig("ANDROID_KEY_ALIAS")
+val releaseKeyPassword = readConfig("ANDROID_KEY_PASSWORD")
+val releaseKeystoreFile = releaseKeystorePath?.let { configuredPath ->
+    val candidate = File(configuredPath)
+    if (candidate.isAbsolute) candidate else File(rootProject.projectDir, configuredPath)
+}
+val isReleaseSigningConfigured = listOf(
+    releaseKeystoreFile?.path,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.patentia"
@@ -43,9 +73,23 @@ android {
         manifestPlaceholders["mapsApiKey"] = mapsApiKey
     }
 
+    signingConfigs {
+        create("release") {
+            if (isReleaseSigningConfigured) {
+                storeFile = requireNotNull(releaseKeystoreFile)
+                storePassword = requireNotNull(releaseKeystorePassword)
+                keyAlias = requireNotNull(releaseKeyAlias)
+                keyPassword = requireNotNull(releaseKeyPassword)
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (isReleaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

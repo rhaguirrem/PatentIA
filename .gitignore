@@ -4,6 +4,8 @@
 .kotlin/
 .vscode/
 local.properties
+keystore.properties
+.secrets/
 /build/
 **/build/
 .DS_Store
