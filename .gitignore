@@ -1,0 +1,13 @@
+*.iml
+.gradle/
+.idea/
+.kotlin/
+.vscode/
+local.properties
+/build/
+**/build/
+.DS_Store
+captures/
+credentials.txt
+*.log
+app/google-services.json

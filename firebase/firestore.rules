@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function memberDoc(groupId) {
+      return /databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid);
+    }
+
+    function isGroupMember(groupId) {
+      return signedIn() && exists(memberDoc(groupId));
+    }
+
+    function isGroupAdmin(groupId) {
+      return isGroupMember(groupId) &&
+        get(memberDoc(groupId)).data.role in ['owner', 'admin'];
+    }
+
+    match /users/{userId} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /groups/{groupId} {
+      allow read: if isGroupMember(groupId);
+      allow create: if signedIn();
+      allow update, delete: if isGroupAdmin(groupId);
+
+      match /members/{userId} {
+        allow read: if isGroupMember(groupId);
+        allow create, update, delete: if isGroupAdmin(groupId);
+      }
+
+      match /sightings/{sightingId} {
+        allow read: if isGroupMember(groupId);
+        allow create: if isGroupMember(groupId)
+          && request.resource.data.groupId == groupId
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.plateNumber is string
+          && request.resource.data.capturedAtEpochMillis is int;
+        allow update: if isGroupMember(groupId)
+          && resource.data.createdBy == request.auth.uid
+          && request.resource.data.createdBy == resource.data.createdBy
+          && request.resource.data.groupId == resource.data.groupId;
+        allow delete: if resource.data.createdBy == request.auth.uid || isGroupAdmin(groupId);
+      }
+    }
+  }
+}

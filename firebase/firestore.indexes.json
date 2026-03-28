@@ -1,0 +1,33 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "sightings",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "plateNumber",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "capturedAtEpochMillis",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "sightings",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "createdBy",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "capturedAtEpochMillis",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
