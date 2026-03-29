@@ -11,6 +11,7 @@ import com.google.firebase.storage.storage
 import com.patentia.BuildConfig
 import com.patentia.data.PlateSighting
 import com.patentia.data.SharedGroup
+import java.io.File
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -223,6 +224,41 @@ class FirebaseRemoteSyncDataSource(
         }
     }
 
+    override suspend fun deleteSighting(
+        session: RemoteSyncSession,
+        sighting: PlateSighting,
+    ): String? {
+        if (!isConfigured || !session.isAvailable || session.groupId == null || session.userId == null) {
+            return "Firestore session unavailable"
+        }
+
+        val groupId = sighting.groupId ?: session.groupId
+        val remoteId = sighting.remoteId
+        if (groupId.isNullOrBlank() || remoteId.isNullOrBlank()) {
+            return "Remote sighting metadata is incomplete"
+        }
+
+        val remoteDocument = Firebase.firestore
+            .collection(GROUPS_COLLECTION)
+            .document(groupId)
+            .collection(SIGHTINGS_COLLECTION)
+            .document(remoteId)
+
+        return try {
+            val snapshot = remoteDocument.get().await()
+            val imageStoragePath = snapshot.getString("imageStoragePath")
+            if (!imageStoragePath.isNullOrBlank()) {
+                runCatching {
+                    Firebase.storage.reference.child(imageStoragePath).delete().await()
+                }
+            }
+            remoteDocument.delete().await()
+            null
+        } catch (exception: Exception) {
+            exception.message ?: "Firestore delete failed"
+        }
+    }
+
     companion object {
         private const val GROUPS_COLLECTION = "groups"
         private const val MEMBERS_COLLECTION = "members"
@@ -231,7 +267,10 @@ class FirebaseRemoteSyncDataSource(
 
         fun isFirebaseConfigured(context: Context): Boolean {
             val resourceId = context.resources.getIdentifier("google_app_id", "string", context.packageName)
-            return resourceId != 0
+            if (resourceId == 0) {
+                return false
+            }
+            return context.getString(resourceId).isNotBlank()
         }
     }
 
@@ -276,14 +315,24 @@ class FirebaseRemoteSyncDataSource(
 
         val imageUri = runCatching { Uri.parse(imageUriString) }.getOrNull()
             ?: return UploadedImageResult(errorMessage = "Invalid local image URI")
+        val uploadUri = when (imageUri.scheme) {
+            null, "" -> Uri.fromFile(File(imageUriString))
+            else -> imageUri
+        }
         val storagePath = "$STORAGE_ROOT/$groupId/sightings/${sighting.clientGeneratedId}.jpg"
         val storageReference = Firebase.storage.reference.child(storagePath)
 
         return try {
-            appContext.contentResolver.openInputStream(imageUri)?.close()
-                ?: return UploadedImageResult(errorMessage = "Local image file is not accessible")
+            val isReadable = when (uploadUri.scheme) {
+                "file" -> uploadUri.path?.let { File(it).exists() } == true
+                "content" -> appContext.contentResolver.openInputStream(uploadUri)?.use { true } ?: false
+                else -> true
+            }
+            if (!isReadable) {
+                return UploadedImageResult(errorMessage = "Local image file is not accessible")
+            }
 
-            storageReference.putFile(imageUri).await()
+            storageReference.putFile(uploadUri).await()
             val downloadUrl = storageReference.downloadUrl.await().toString()
             UploadedImageResult(
                 downloadUrl = downloadUrl,
@@ -303,15 +352,7 @@ class FirebaseRemoteSyncDataSource(
 
     private fun storageFallbackWarning(exception: Exception): String? {
         if (exception is StorageException) {
-            return when (exception.errorCode) {
-                StorageException.ERROR_BUCKET_NOT_FOUND,
-                StorageException.ERROR_PROJECT_NOT_FOUND,
-                StorageException.ERROR_QUOTA_EXCEEDED -> {
-                    "Cloud image upload is unavailable; the sighting was shared without its photo."
-                }
-
-                else -> null
-            }
+            return "Cloud image upload is unavailable; the sighting was shared without its photo."
         }
 
         val message = exception.message?.lowercase().orEmpty()
@@ -319,6 +360,9 @@ class FirebaseRemoteSyncDataSource(
             "billing" in message ||
             "bucket" in message ||
             "quota" in message ||
+            "permission" in message ||
+            "unauthorized" in message ||
+            "forbidden" in message ||
             "project not found" in message ||
             "storage is not available" in message
         ) {

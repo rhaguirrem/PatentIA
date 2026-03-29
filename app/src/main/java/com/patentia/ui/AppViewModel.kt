@@ -14,7 +14,10 @@ import com.patentia.data.SyncDiagnostics
 import com.patentia.data.remote.FirebaseRemoteSyncDataSource
 import com.patentia.data.remote.NoOpRemoteSightingSyncDataSource
 import com.patentia.data.toExportModel
+import com.patentia.services.AppUpdateManager
+import com.patentia.services.AppImageStore
 import com.patentia.services.CurrentLocationProvider
+import com.patentia.services.GeoPoint
 import com.patentia.services.PlateRecognizer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -38,10 +41,43 @@ enum class TimeFilter {
     LAST_7_DAYS,
 }
 
+enum class LocationStatus {
+    CHECKING,
+    READY,
+    WAITING_FOR_FIX,
+    DISABLED,
+}
+
+enum class AppUpdateStatus {
+    IDLE,
+    CHECKING,
+    AVAILABLE,
+    DOWNLOADING,
+    UP_TO_DATE,
+    INSTALLING,
+    ERROR,
+}
+
+data class AppUpdateUiState(
+    val installedVersionName: String = "",
+    val installedVersionCode: Long = 0,
+    val status: AppUpdateStatus = AppUpdateStatus.IDLE,
+    val availableVersionName: String? = null,
+    val availableVersionCode: Long? = null,
+    val downloadSizeBytes: Long? = null,
+    val availableDownloadUrl: String? = null,
+    val availablePageUrl: String? = null,
+    val downloadedApkPath: String? = null,
+    val statusMessage: String = "Check the shared update manifest for updates.",
+    val lastCheckedAtEpochMillis: Long? = null,
+)
+
 data class AppUiState(
     val allSightings: List<PlateSighting> = emptyList(),
     val filteredSightings: List<PlateSighting> = emptyList(),
     val selectedPlateHistory: List<PlateSighting> = emptyList(),
+    val currentLocation: GeoPoint? = null,
+    val locationStatus: LocationStatus = LocationStatus.CHECKING,
     val selectedPlate: String? = null,
     val searchQuery: String = "",
     val repeatedOnly: Boolean = false,
@@ -53,6 +89,23 @@ data class AppUiState(
     val lastRecognizedPlates: List<String> = emptyList(),
     val theoreticalRadiusMeters: Double = 0.0,
     val syncDiagnostics: SyncDiagnostics = SyncDiagnostics(),
+    val appUpdate: AppUpdateUiState = AppUpdateUiState(),
+)
+
+private data class FilterInputs(
+    val sightings: List<PlateSighting>,
+    val syncDiagnostics: SyncDiagnostics,
+    val searchQuery: String,
+    val repeatedOnly: Boolean,
+    val timeFilter: TimeFilter,
+)
+
+private data class RuntimeInputs(
+    val selectedPlate: String?,
+    val captureMode: CaptureMode,
+    val intervalSeconds: Int,
+    val intervalRunning: Boolean,
+    val statusMessage: String,
 )
 
 class AppViewModel(
@@ -60,6 +113,8 @@ class AppViewModel(
     private val repository: SightingRepository,
     private val plateRecognizer: PlateRecognizer,
     private val currentLocationProvider: CurrentLocationProvider,
+    private val imageStore: AppImageStore,
+    private val appUpdateManager: AppUpdateManager,
 ) : ViewModel() {
 
     private val searchQuery = MutableStateFlow("")
@@ -71,35 +126,69 @@ class AppViewModel(
     private val intervalRunning = MutableStateFlow(false)
     private val statusMessage = MutableStateFlow("Ready for capture")
     private val lastRecognizedPlates = MutableStateFlow<List<String>>(emptyList())
+    private val currentLocation = MutableStateFlow<GeoPoint?>(null)
+    private val locationStatus = MutableStateFlow(LocationStatus.CHECKING)
+    private val installedAppVersion = appUpdateManager.getInstalledVersionInfo()
+    private val appUpdateState = MutableStateFlow(
+        AppUpdateUiState(
+            installedVersionName = installedAppVersion.versionName,
+            installedVersionCode = installedAppVersion.versionCode,
+        )
+    )
 
     init {
         repository.startRealtimeSync(viewModelScope)
     }
 
-    val uiState: StateFlow<AppUiState> = combine(
+    private val filterInputs = combine(
         repository.observeSightings(),
         repository.observeSyncDiagnostics(),
         searchQuery,
         repeatedOnly,
         timeFilter,
+    ) { sightings, syncDiagnostics, query, repeated, window ->
+        FilterInputs(
+            sightings = sightings,
+            syncDiagnostics = syncDiagnostics,
+            searchQuery = query,
+            repeatedOnly = repeated,
+            timeFilter = window,
+        )
+    }
+
+    private val runtimeInputs = combine(
         selectedPlate,
         captureMode,
         intervalSeconds,
         intervalRunning,
         statusMessage,
+    ) { selected, mode, interval, running, status ->
+        RuntimeInputs(
+            selectedPlate = selected,
+            captureMode = mode,
+            intervalSeconds = interval,
+            intervalRunning = running,
+            statusMessage = status,
+        )
+    }
+
+    private val baseUiState = combine(
+        filterInputs,
+        runtimeInputs,
         lastRecognizedPlates,
-    ) { values ->
-        val sightings = values[0] as List<PlateSighting>
-        val syncDiagnostics = values[1] as SyncDiagnostics
-        val query = values[2] as String
-        val repeated = values[3] as Boolean
-        val window = values[4] as TimeFilter
-        val selected = values[5] as String?
-        val mode = values[6] as CaptureMode
-        val interval = values[7] as Int
-        val running = values[8] as Boolean
-        val status = values[9] as String
-        val recognized = values[10] as List<String>
+        currentLocation,
+        locationStatus,
+    ) { filters, runtime, recognized, location, gpsStatus ->
+        val sightings = filters.sightings
+        val syncDiagnostics = filters.syncDiagnostics
+        val query = filters.searchQuery
+        val repeated = filters.repeatedOnly
+        val window = filters.timeFilter
+        val selected = runtime.selectedPlate
+        val mode = runtime.captureMode
+        val interval = runtime.intervalSeconds
+        val running = runtime.intervalRunning
+        val status = runtime.statusMessage
 
         val cutoff = when (window) {
             TimeFilter.ALL -> 0L
@@ -136,6 +225,8 @@ class AppViewModel(
             allSightings = sightings,
             filteredSightings = filtered,
             selectedPlateHistory = selectedHistory,
+            currentLocation = location,
+            locationStatus = gpsStatus,
             selectedPlate = selected,
             searchQuery = query,
             repeatedOnly = repeated,
@@ -148,6 +239,13 @@ class AppViewModel(
             theoreticalRadiusMeters = theoreticalRadius,
             syncDiagnostics = syncDiagnostics,
         )
+    }
+
+    val uiState: StateFlow<AppUiState> = combine(
+        baseUiState,
+        appUpdateState,
+    ) { baseUiState, updateUiState ->
+        baseUiState.copy(appUpdate = updateUiState)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -164,6 +262,25 @@ class AppViewModel(
 
     fun setTimeFilter(value: TimeFilter) {
         timeFilter.value = value
+    }
+
+    fun refreshCurrentLocation() {
+        viewModelScope.launch {
+            locationStatus.value = LocationStatus.CHECKING
+            if (!currentLocationProvider.isLocationEnabled()) {
+                currentLocation.value = null
+                locationStatus.value = LocationStatus.DISABLED
+                return@launch
+            }
+
+            val location = currentLocationProvider.getCurrentLocation()
+            currentLocation.value = location
+            locationStatus.value = if (location != null) {
+                LocationStatus.READY
+            } else {
+                LocationStatus.WAITING_FOR_FIX
+            }
+        }
     }
 
     fun selectPlate(plateNumber: String?) {
@@ -193,10 +310,22 @@ class AppViewModel(
     fun processImage(imageUri: Uri, source: String) {
         viewModelScope.launch {
             statusMessage.value = "Recognizing licence plate"
-            val recognition = plateRecognizer.recognize(appContext, imageUri)
+            val persistedImageUri = runCatching { imageStore.persist(imageUri) }
+                .getOrElse {
+                    statusMessage.value = it.message ?: "Could not store image"
+                    return@launch
+                }
+
+            val recognition = runCatching {
+                plateRecognizer.recognize(appContext, persistedImageUri)
+            }.getOrElse {
+                statusMessage.value = it.message ?: "Plate recognition failed"
+                return@launch
+            }
             lastRecognizedPlates.value = recognition.plates
 
             if (recognition.plates.isEmpty()) {
+                imageStore.delete(persistedImageUri)
                 statusMessage.value = "No plate pattern recognized"
                 return@launch
             }
@@ -208,7 +337,7 @@ class AppViewModel(
             val savedPlates = repository.saveSightings(
                 recognizedPlates = listOf(primaryPlate),
                 rawText = recognition.rawText,
-                imageUri = imageUri.toString(),
+                imageUri = persistedImageUri.toString(),
                 latitude = location?.latitude,
                 longitude = location?.longitude,
                 capturedAtEpochMillis = System.currentTimeMillis(),
@@ -292,6 +421,169 @@ class AppViewModel(
         }
     }
 
+    fun deleteSighting(clientGeneratedId: String, imageUri: String?) {
+        viewModelScope.launch {
+            statusMessage.value = "Deleting history entry"
+            val errorMessage = repository.deleteSighting(clientGeneratedId, imageUri)
+            statusMessage.value = errorMessage ?: "History entry deleted"
+        }
+    }
+
+    fun checkForAppUpdate() {
+        viewModelScope.launch {
+            statusMessage.value = "Checking shared APK for updates"
+            appUpdateState.update {
+                it.copy(
+                    status = AppUpdateStatus.CHECKING,
+                    statusMessage = "Fetching the remote update manifest.",
+                    lastCheckedAtEpochMillis = System.currentTimeMillis(),
+                    downloadedApkPath = null,
+                )
+            }
+
+            when (val result = appUpdateManager.checkForUpdate()) {
+                is AppUpdateManager.UpdateCheckResult.UpdateAvailable -> {
+                    appUpdateState.value = appUpdateState.value.copy(
+                        status = AppUpdateStatus.AVAILABLE,
+                        availableVersionName = result.remoteVersion.versionName,
+                        availableVersionCode = result.remoteVersion.versionCode,
+                        downloadSizeBytes = result.remoteVersion.fileSizeBytes,
+                        availableDownloadUrl = result.downloadUrl,
+                        availablePageUrl = result.pageUrl,
+                        downloadedApkPath = null,
+                        statusMessage = "Update found. Tap Install update to download it and open the Android package installer.",
+                        lastCheckedAtEpochMillis = System.currentTimeMillis(),
+                    )
+                    statusMessage.value = "Update ${result.remoteVersion.versionName} is available"
+                }
+
+                is AppUpdateManager.UpdateCheckResult.UpToDate -> {
+                    appUpdateState.value = appUpdateState.value.copy(
+                        status = AppUpdateStatus.UP_TO_DATE,
+                        availableVersionName = result.remoteVersionName,
+                        availableVersionCode = result.remoteVersionCode,
+                        downloadSizeBytes = null,
+                        availableDownloadUrl = null,
+                        availablePageUrl = result.pageUrl,
+                        downloadedApkPath = null,
+                        statusMessage = "This device is already on the newest published build.",
+                        lastCheckedAtEpochMillis = System.currentTimeMillis(),
+                    )
+                    statusMessage.value = "PatentIA is already up to date"
+                }
+
+                is AppUpdateManager.UpdateCheckResult.Failed -> {
+                    appUpdateState.value = appUpdateState.value.copy(
+                        status = AppUpdateStatus.ERROR,
+                        availableVersionName = null,
+                        availableVersionCode = null,
+                        downloadSizeBytes = null,
+                        availableDownloadUrl = null,
+                        availablePageUrl = null,
+                        downloadedApkPath = null,
+                        statusMessage = result.message,
+                        lastCheckedAtEpochMillis = System.currentTimeMillis(),
+                    )
+                    statusMessage.value = "Update check failed"
+                }
+            }
+        }
+    }
+
+    fun installDownloadedUpdate() {
+        viewModelScope.launch {
+            val currentUpdateState = appUpdateState.value
+            val downloadedApkPath = currentUpdateState.downloadedApkPath
+            val apkPathToInstall = if (downloadedApkPath.isNullOrBlank()) {
+                val downloadUrl = currentUpdateState.availableDownloadUrl
+                if (downloadUrl.isNullOrBlank()) {
+                    appUpdateState.update {
+                        it.copy(
+                            status = AppUpdateStatus.ERROR,
+                            statusMessage = "Run Check for updates first so the app can resolve the latest download URL.",
+                        )
+                    }
+                    return@launch
+                }
+
+                statusMessage.value = "Downloading update package"
+                appUpdateState.update {
+                    it.copy(
+                        status = AppUpdateStatus.DOWNLOADING,
+                        statusMessage = "Downloading the update package.",
+                    )
+                }
+
+                when (val downloadResult = appUpdateManager.downloadUpdateApk(downloadUrl)) {
+                    is AppUpdateManager.DownloadUpdateResult.Downloaded -> {
+                        appUpdateState.update {
+                            it.copy(
+                                status = AppUpdateStatus.AVAILABLE,
+                                downloadedApkPath = downloadResult.downloadedApkPath,
+                                downloadSizeBytes = downloadResult.fileSizeBytes,
+                                statusMessage = "Update downloaded. Opening the Android package installer next.",
+                            )
+                        }
+                        downloadResult.downloadedApkPath
+                    }
+
+                    is AppUpdateManager.DownloadUpdateResult.Failed -> {
+                        appUpdateState.update {
+                            it.copy(
+                                status = AppUpdateStatus.ERROR,
+                                statusMessage = downloadResult.message,
+                            )
+                        }
+                        statusMessage.value = "Update download failed"
+                        return@launch
+                    }
+                }
+            } else {
+                downloadedApkPath
+            }
+
+            statusMessage.value = "Opening Android installer"
+            appUpdateState.update {
+                it.copy(
+                    status = AppUpdateStatus.INSTALLING,
+                    statusMessage = "Opening the Android package installer.",
+                )
+            }
+
+            when (val result = appUpdateManager.installDownloadedApk(apkPathToInstall)) {
+                is AppUpdateManager.InstallUpdateResult.InstallerOpened -> {
+                    appUpdateState.update {
+                        it.copy(
+                            status = AppUpdateStatus.INSTALLING,
+                            statusMessage = result.message,
+                        )
+                    }
+                    statusMessage.value = "Installer opened"
+                }
+
+                is AppUpdateManager.InstallUpdateResult.PermissionRequired -> {
+                    appUpdateState.update {
+                        it.copy(
+                            status = AppUpdateStatus.AVAILABLE,
+                            statusMessage = result.message,
+                        )
+                    }
+                    statusMessage.value = "Enable unknown app installs, then retry"
+                }
+
+                is AppUpdateManager.InstallUpdateResult.Failed -> {
+                    appUpdateState.update {
+                        it.copy(
+                            status = AppUpdateStatus.ERROR,
+                            statusMessage = result.message,
+                        )
+                    }
+                    statusMessage.value = "Installer could not be opened"
+                }
+            }
+        }
+    }
+
     companion object {
         fun factory(appContext: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -307,6 +599,8 @@ class AppViewModel(
                 )
                 val recognizer = PlateRecognizer()
                 val locationProvider = CurrentLocationProvider(appContext)
+                val imageStore = AppImageStore(appContext)
+                val appUpdateManager = AppUpdateManager(appContext)
 
                 @Suppress("UNCHECKED_CAST")
                 return AppViewModel(
@@ -314,6 +608,8 @@ class AppViewModel(
                     repository = repository,
                     plateRecognizer = recognizer,
                     currentLocationProvider = locationProvider,
+                    imageStore = imageStore,
+                    appUpdateManager = appUpdateManager,
                 ) as T
             }
         }

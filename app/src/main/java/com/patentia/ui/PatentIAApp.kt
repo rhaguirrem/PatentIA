@@ -1,13 +1,17 @@
 package com.patentia.ui
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.view.ScaleGestureDetector
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -20,20 +24,16 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -43,23 +43,26 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Groups
-import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -68,7 +71,6 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.ui.window.Dialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -76,7 +78,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -88,6 +89,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -98,6 +100,8 @@ import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.MapProperties
+import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Polyline
@@ -106,6 +110,8 @@ import com.patentia.BuildConfig
 import com.patentia.data.PlateSighting
 import com.patentia.data.PlateSyncState
 import com.patentia.data.SyncDiagnostics
+import com.patentia.services.AppImageStore
+import com.patentia.services.GeoPoint
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -113,7 +119,8 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 private enum class AppPanel(val label: String) {
     Camera("Camera"),
@@ -123,12 +130,39 @@ private enum class AppPanel(val label: String) {
     About("About"),
 }
 
+private data class PatenteChileLookup(
+    val plateNumber: String,
+    val ownerName: String? = null,
+    val ownerRut: String? = null,
+    val vehicleMake: String? = null,
+    val vehicleModel: String? = null,
+    val vehicleYear: String? = null,
+    val vehicleColor: String? = null,
+) {
+    val ownerChipLabel: String?
+        get() = listOfNotNull(ownerName, ownerRut).takeIf { it.isNotEmpty() }?.joinToString(" • ")
+
+    val vehicleChipLabel: String?
+        get() = listOfNotNull(vehicleMake, vehicleModel, vehicleYear).takeIf { it.isNotEmpty() }?.joinToString(" ")
+
+    val colorChipLabel: String?
+        get() = vehicleColor
+
+    fun hasMeaningfulData(): Boolean {
+        return !ownerName.isNullOrBlank() ||
+            !ownerRut.isNullOrBlank() ||
+            !vehicleMake.isNullOrBlank() ||
+            !vehicleModel.isNullOrBlank() ||
+            !vehicleYear.isNullOrBlank() ||
+            !vehicleColor.isNullOrBlank()
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PatentIAApp(viewModel: AppViewModel) {
     val uiState by viewModel.uiState.collectAsState()
-    val pagerState = rememberPagerState(pageCount = { AppPanel.entries.size })
-    val coroutineScope = rememberCoroutineScope()
+    var selectedPanel by rememberSaveable { mutableStateOf(AppPanel.Camera) }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var permissionRefreshToken by remember { mutableStateOf(0) }
@@ -154,8 +188,14 @@ fun PatentIAApp(viewModel: AppViewModel) {
         isPermissionGranted(context, android.Manifest.permission.CAMERA)
     }
     val hasLocationPermission = remember(permissionRefreshToken) {
-        isPermissionGranted(context, android.Manifest.permission.ACCESS_FINE_LOCATION)
-            || isPermissionGranted(context, android.Manifest.permission.ACCESS_COARSE_LOCATION)
+        isPermissionGranted(context, android.Manifest.permission.ACCESS_FINE_LOCATION) ||
+            isPermissionGranted(context, android.Manifest.permission.ACCESS_COARSE_LOCATION)
+    }
+
+    LaunchedEffect(permissionRefreshToken, hasLocationPermission) {
+        if (hasLocationPermission) {
+            viewModel.refreshCurrentLocation()
+        }
     }
 
     MaterialTheme(
@@ -163,7 +203,6 @@ fun PatentIAApp(viewModel: AppViewModel) {
     ) {
         Surface(modifier = Modifier.fillMaxSize()) {
             Scaffold(
-                contentWindowInsets = WindowInsets.statusBars,
                 topBar = {
                     CenterAlignedTopAppBar(
                         title = {
@@ -209,77 +248,81 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 .padding(horizontal = 16.dp, vertical = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            AppPanel.entries.forEachIndexed { index, panel ->
+                            AppPanel.entries.forEach { panel ->
                                 FilterChip(
-                                    selected = pagerState.currentPage == index,
-                                    onClick = {
-                                        coroutineScope.launch {
-                                            pagerState.animateScrollToPage(index)
-                                        }
-                                    },
+                                    selected = selectedPanel == panel,
+                                    onClick = { selectedPanel = panel },
                                     label = { Text(panel.label) },
+                                    colors = patentIAFilterChipColors(),
                                 )
                             }
                         }
 
-                        HorizontalPager(
-                            state = pagerState,
-                            modifier = Modifier
-                                .weight(1f, fill = true)
-                                .fillMaxWidth(),
-                            beyondViewportPageCount = 1,
-                        ) { page ->
-                            when (AppPanel.entries[page]) {
-                                AppPanel.Camera -> CameraPanel(
-                                    modifier = Modifier.fillMaxSize(),
-                                    uiState = uiState,
-                                    onCaptureModeChange = viewModel::setCaptureMode,
-                                    onIntervalSecondsChange = viewModel::setIntervalSeconds,
-                                    onToggleInterval = viewModel::toggleIntervalCapture,
-                                    onImageCaptured = viewModel::processImage,
-                                )
+                        when (selectedPanel) {
+                            AppPanel.Camera -> CameraPanel(
+                                modifier = Modifier
+                                    .weight(1f, fill = true)
+                                    .fillMaxWidth(),
+                                uiState = uiState,
+                                onCaptureModeChange = viewModel::setCaptureMode,
+                                onIntervalSecondsChange = viewModel::setIntervalSeconds,
+                                onToggleInterval = viewModel::toggleIntervalCapture,
+                                onImageCaptured = viewModel::processImage,
+                            )
 
-                                AppPanel.Map -> MapScreen(
-                                    modifier = Modifier.fillMaxSize(),
-                                    uiState = uiState,
-                                    onSearchChange = viewModel::updateSearchQuery,
-                                    onRepeatedOnlyChange = viewModel::setRepeatedOnly,
-                                    onTimeFilterChange = viewModel::setTimeFilter,
-                                    onSelectPlate = viewModel::selectPlate,
-                                )
+                            AppPanel.Map -> MapScreen(
+                                modifier = Modifier
+                                    .weight(1f, fill = true)
+                                    .fillMaxWidth(),
+                                uiState = uiState,
+                                onSearchChange = viewModel::updateSearchQuery,
+                                onRepeatedOnlyChange = viewModel::setRepeatedOnly,
+                                onTimeFilterChange = viewModel::setTimeFilter,
+                                onSelectPlate = viewModel::selectPlate,
+                            )
 
-                                AppPanel.Cloudsync -> CloudSyncPanel(
-                                    modifier = Modifier.fillMaxSize(),
-                                    uiState = uiState,
-                                    onSwitchGroup = viewModel::switchActiveGroup,
-                                    onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
-                                    onRetryPendingSync = viewModel::retryPendingSync,
-                                )
+                            AppPanel.Cloudsync -> CloudSyncPanel(
+                                modifier = Modifier
+                                    .weight(1f, fill = true)
+                                    .fillMaxWidth(),
+                                uiState = uiState,
+                                onSwitchGroup = viewModel::switchActiveGroup,
+                                onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
+                                onRetryPendingSync = viewModel::retryPendingSync,
+                            )
 
-                                AppPanel.History -> HistoryScreen(
-                                    modifier = Modifier.fillMaxSize(),
-                                    uiState = uiState,
-                                    onSearchChange = viewModel::updateSearchQuery,
-                                    onRepeatedOnlyChange = viewModel::setRepeatedOnly,
-                                    onTimeFilterChange = viewModel::setTimeFilter,
-                                    onSelectPlate = viewModel::selectPlate,
-                                    onShareSelected = {
-                                        viewModel.buildSelectedPlateSharePayload()?.let { payload ->
-                                            shareText(context, payload)
-                                        }
-                                    },
-                                    onRetrySighting = viewModel::retrySighting,
-                                    onDeleteLocalImage = viewModel::removeLocalImage,
-                                )
+                            AppPanel.History -> HistoryScreen(
+                                modifier = Modifier
+                                    .weight(1f, fill = true)
+                                    .fillMaxWidth(),
+                                uiState = uiState,
+                                onSearchChange = viewModel::updateSearchQuery,
+                                onRepeatedOnlyChange = viewModel::setRepeatedOnly,
+                                onTimeFilterChange = viewModel::setTimeFilter,
+                                onSelectPlate = viewModel::selectPlate,
+                                onShareSelected = {
+                                    viewModel.buildSelectedPlateSharePayload()?.let { payload ->
+                                        shareText(context, payload)
+                                    }
+                                },
+                                onRetrySighting = viewModel::retrySighting,
+                                onDeleteSighting = viewModel::deleteSighting,
+                                onDeleteLocalImage = viewModel::removeLocalImage,
+                            )
 
-                                AppPanel.About -> AboutPanel(
-                                    modifier = Modifier.fillMaxSize(),
-                                    uiState = uiState,
-                                    hasCameraPermission = hasCameraPermission,
-                                    hasLocationPermission = hasLocationPermission,
-                                    onSelectPlate = viewModel::selectPlate,
-                                )
-                            }
+                            AppPanel.About -> AboutPanel(
+                                modifier = Modifier
+                                    .weight(1f, fill = true)
+                                    .fillMaxWidth(),
+                                uiState = uiState,
+                                hasCameraPermission = hasCameraPermission,
+                                hasLocationPermission = hasLocationPermission,
+                                onSelectPlate = viewModel::selectPlate,
+                                onRefreshLocation = viewModel::refreshCurrentLocation,
+                                onCheckForUpdates = viewModel::checkForAppUpdate,
+                                onInstallUpdate = viewModel::installDownloadedUpdate,
+                                onOpenUpdatePage = { openBrowserUrl(context, BuildConfig.APP_UPDATE_PAGE_URL) },
+                            )
                         }
                     }
                 }
@@ -397,6 +440,10 @@ private fun AboutPanel(
     hasCameraPermission: Boolean,
     hasLocationPermission: Boolean,
     onSelectPlate: (String?) -> Unit,
+    onRefreshLocation: () -> Unit,
+    onCheckForUpdates: () -> Unit,
+    onInstallUpdate: () -> Unit,
+    onOpenUpdatePage: () -> Unit,
 ) {
     Column(
         modifier = modifier
@@ -405,11 +452,73 @@ private fun AboutPanel(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         DriverSummaryCard(uiState = uiState, onSelectPlate = onSelectPlate)
+        GpsStatusCard(
+            locationStatus = uiState.locationStatus,
+            currentLocation = uiState.currentLocation,
+            onRefreshLocation = onRefreshLocation,
+        )
+        AppUpdateCard(
+            appUpdate = uiState.appUpdate,
+            onCheckForUpdates = onCheckForUpdates,
+            onInstallUpdate = onInstallUpdate,
+            onOpenUpdatePage = onOpenUpdatePage,
+        )
         SetupChecklistCard(
             syncDiagnostics = uiState.syncDiagnostics,
             hasCameraPermission = hasCameraPermission,
             hasLocationPermission = hasLocationPermission,
         )
+    }
+}
+
+@Composable
+private fun GpsStatusCard(
+    locationStatus: LocationStatus,
+    currentLocation: GeoPoint?,
+    onRefreshLocation: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "GPS status",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            AssistChip(
+                onClick = onRefreshLocation,
+                label = { Text(gpsStatusLabel(locationStatus)) },
+                leadingIcon = {
+                    when (locationStatus) {
+                        LocationStatus.READY -> Icon(Icons.Default.CheckCircle, contentDescription = null)
+                        LocationStatus.DISABLED -> Icon(Icons.Default.CloudOff, contentDescription = null)
+                        LocationStatus.WAITING_FOR_FIX -> Icon(Icons.Default.Route, contentDescription = null)
+                        LocationStatus.CHECKING -> CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                },
+                trailingIcon = {
+                    Icon(Icons.Default.Sync, contentDescription = null)
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = gpsStatusContainerColor(locationStatus),
+                    labelColor = gpsStatusContentColor(locationStatus),
+                    leadingIconContentColor = gpsStatusContentColor(locationStatus),
+                    trailingIconContentColor = gpsStatusContentColor(locationStatus),
+                ),
+            )
+            Text(
+                text = gpsStatusDetail(locationStatus, currentLocation),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -437,7 +546,7 @@ private fun SetupChecklistCard(
             ),
             ChecklistItem(
                 label = "Shared group selected",
-                done = !syncDiagnostics.activeGroupId.isNullOrBlank(),
+                done = syncDiagnostics.isConfigured && !syncDiagnostics.activeGroupId.isNullOrBlank(),
                 detail = "Use the sync card to join or create a team group.",
             ),
         )
@@ -474,6 +583,81 @@ private fun SetupChecklistCard(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppUpdateCard(
+    appUpdate: AppUpdateUiState,
+    onCheckForUpdates: () -> Unit,
+    onInstallUpdate: () -> Unit,
+    onOpenUpdatePage: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "App updates",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "Installed ${formatVersionLabel(appUpdate.installedVersionName, appUpdate.installedVersionCode)}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = appUpdate.statusMessage,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            appUpdate.availableVersionName?.let { versionName ->
+                AssistChip(
+                    onClick = { },
+                    label = {
+                        Text(
+                            "Shared APK ${formatVersionLabel(versionName, appUpdate.availableVersionCode)}" +
+                                formatByteCountSuffix(appUpdate.downloadSizeBytes)
+                        )
+                    },
+                )
+            }
+            appUpdate.lastCheckedAtEpochMillis?.let { checkedAt ->
+                Text(
+                    text = "Last checked ${formatTimestamp(checkedAt)}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (
+                appUpdate.status == AppUpdateStatus.CHECKING ||
+                appUpdate.status == AppUpdateStatus.DOWNLOADING ||
+                appUpdate.status == AppUpdateStatus.INSTALLING
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onCheckForUpdates,
+                    enabled = appUpdate.status != AppUpdateStatus.CHECKING && appUpdate.status != AppUpdateStatus.DOWNLOADING,
+                ) {
+                    Text("Check for updates")
+                }
+                OutlinedButton(
+                    onClick = onInstallUpdate,
+                    enabled = appUpdate.availableVersionCode != null &&
+                        appUpdate.status != AppUpdateStatus.CHECKING &&
+                        appUpdate.status != AppUpdateStatus.DOWNLOADING,
+                ) {
+                    Text("Install update")
+                }
+            }
+            TextButton(onClick = onOpenUpdatePage) {
+                Text("Open shared APK link")
             }
         }
     }
@@ -518,6 +702,7 @@ private fun SyncStatusCard(
     onSwitchGroup: (String) -> Unit,
     onJoinOrCreateGroup: (String) -> Unit,
 ) {
+    val isCloudSyncAvailable = syncDiagnostics.isConfigured
     var groupCode by rememberSaveable(syncDiagnostics.activeGroupId, syncDiagnostics.availableGroups) {
         mutableStateOf(syncDiagnostics.activeGroupId.orEmpty())
     }
@@ -538,7 +723,7 @@ private fun SyncStatusCard(
                 syncSubtitle(syncDiagnostics),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (syncDiagnostics.availableGroups.isNotEmpty()) {
+            if (isCloudSyncAvailable && syncDiagnostics.availableGroups.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     syncDiagnostics.availableGroups.take(4).forEach { group ->
                         FilterChip(
@@ -548,37 +733,40 @@ private fun SyncStatusCard(
                             leadingIcon = {
                                 Icon(Icons.Default.Groups, contentDescription = null)
                             },
+                            colors = patentIAFilterChipColors(),
                         )
                     }
                 }
             }
-            OutlinedTextField(
-                modifier = Modifier.fillMaxWidth(),
-                value = groupCode,
-                onValueChange = { groupCode = it },
-                label = { Text("Group code") },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { onJoinOrCreateGroup(groupCode) },
-                    enabled = groupCode.isNotBlank(),
-                ) {
-                    Icon(Icons.Default.Groups, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Join or create")
-                }
-                OutlinedButton(
-                    onClick = onRetryPendingSync,
-                    enabled = syncDiagnostics.pendingUploadCount > 0 || syncDiagnostics.lastError != null,
-                ) {
-                    Icon(Icons.Default.Sync, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Retry now")
+            if (isCloudSyncAvailable) {
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = groupCode,
+                    onValueChange = { groupCode = it },
+                    label = { Text("Group code") },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { onJoinOrCreateGroup(groupCode) },
+                        enabled = groupCode.isNotBlank(),
+                    ) {
+                        Icon(Icons.Default.Groups, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Join or create")
+                    }
+                    OutlinedButton(
+                        onClick = onRetryPendingSync,
+                        enabled = syncDiagnostics.pendingUploadCount > 0 || syncDiagnostics.lastError != null,
+                    ) {
+                        Icon(Icons.Default.Sync, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retry now")
+                    }
                 }
             }
-            if (syncDiagnostics.pendingUploadCount > 0 || syncDiagnostics.lastError != null) {
+            if (isCloudSyncAvailable && (syncDiagnostics.pendingUploadCount > 0 || syncDiagnostics.lastError != null)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (syncDiagnostics.pendingUploadCount > 0) {
                         AssistChip(
@@ -621,11 +809,13 @@ private fun CaptureControls(
                     selected = uiState.captureMode == CaptureMode.SINGLE,
                     onClick = { onCaptureModeChange(CaptureMode.SINGLE) },
                     label = { Text("Single shot") },
+                    colors = patentIAFilterChipColors(),
                 )
                 FilterChip(
                     selected = uiState.captureMode == CaptureMode.INTERVAL,
                     onClick = { onCaptureModeChange(CaptureMode.INTERVAL) },
                     label = { Text("Interval") },
+                    colors = patentIAFilterChipColors(),
                 )
                 Spacer(Modifier.weight(1f))
                 OutlinedButton(onClick = onPickImage) {
@@ -806,19 +996,51 @@ private fun MapScreen(
 ) {
     val mappedSightings = uiState.filteredSightings.filter { it.latitude != null && it.longitude != null }
     val selectedPath = uiState.selectedPlateHistory.filter { it.latitude != null && it.longitude != null }
+    val currentLocation = uiState.currentLocation
     var controlsVisible by rememberSaveable { mutableStateOf(false) }
+    var mapLoaded by rememberSaveable { mutableStateOf(false) }
+    var showMapTroubleshooting by rememberSaveable { mutableStateOf(false) }
     val isMapsConfigured = BuildConfig.IS_MAPS_API_KEY_CONFIGURED
+    val mapProperties = remember(currentLocation) {
+        MapProperties(
+            isMyLocationEnabled = currentLocation != null,
+        )
+    }
+    val mapUiSettings = remember {
+        MapUiSettings(
+            myLocationButtonEnabled = true,
+            zoomControlsEnabled = false,
+        )
+    }
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(48.8566, 2.3522), 10f)
     }
 
-    LaunchedEffect(mappedSightings.firstOrNull()?.id, uiState.selectedPlate) {
+    LaunchedEffect(isMapsConfigured) {
+        mapLoaded = false
+        showMapTroubleshooting = false
+        if (isMapsConfigured) {
+            delay(6_000)
+            if (!mapLoaded) {
+                showMapTroubleshooting = true
+            }
+        }
+    }
+
+    LaunchedEffect(mappedSightings.firstOrNull()?.id, uiState.selectedPlate, currentLocation) {
         val focus = selectedPath.lastOrNull() ?: mappedSightings.firstOrNull()
         if (focus != null) {
             cameraPositionState.move(
                 CameraUpdateFactory.newLatLngZoom(
                     LatLng(focus.latitude ?: return@LaunchedEffect, focus.longitude ?: return@LaunchedEffect),
                     12f,
+                )
+            )
+        } else if (currentLocation != null) {
+            cameraPositionState.move(
+                CameraUpdateFactory.newLatLngZoom(
+                    LatLng(currentLocation.latitude, currentLocation.longitude),
+                    15f,
                 )
             )
         }
@@ -835,6 +1057,12 @@ private fun MapScreen(
                 GoogleMap(
                     modifier = Modifier.fillMaxSize(),
                     cameraPositionState = cameraPositionState,
+                    properties = mapProperties,
+                    uiSettings = mapUiSettings,
+                    onMapLoaded = {
+                        mapLoaded = true
+                        showMapTroubleshooting = false
+                    },
                 ) {
                     mappedSightings.forEach { sighting ->
                         val latitude = sighting.latitude ?: return@forEach
@@ -915,6 +1143,50 @@ private fun MapScreen(
             }
         }
 
+        if (isMapsConfigured && !mapLoaded && !showMapTroubleshooting) {
+            Card(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                ),
+                shape = RoundedCornerShape(20.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+                    Text("Loading map tiles")
+                }
+            }
+        }
+
+        if (showMapTroubleshooting) {
+            Card(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+                ),
+                shape = RoundedCornerShape(24.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text("Map tiles did not load", fontWeight = FontWeight.Bold)
+                    Text(
+                        "This build has a Maps key, but Google Maps did not finish loading. Check the key restrictions, package name, SHA certificate, internet access, and whether Maps SDK for Android is enabled.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
         if (controlsVisible) {
             Card(
                 modifier = Modifier
@@ -981,9 +1253,13 @@ private fun HistoryScreen(
     onSelectPlate: (String?) -> Unit,
     onShareSelected: () -> Unit,
     onRetrySighting: (String) -> Unit,
+    onDeleteSighting: (String, String?) -> Unit,
     onDeleteLocalImage: (String, String?) -> Unit,
 ) {
     var fullScreenImageUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var patenteChileLookupPlate by rememberSaveable { mutableStateOf<String?>(null) }
+    var patenteChileLookupCache by remember { mutableStateOf<Map<String, PatenteChileLookup>>(emptyMap()) }
+    val selectedPlateLookup = uiState.selectedPlate?.let { patenteChileLookupCache[it] }
 
     Column(
         modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -996,41 +1272,88 @@ private fun HistoryScreen(
             onTimeFilterChange = onTimeFilterChange,
         )
         if (uiState.selectedPlate != null) {
-            Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(uiState.selectedPlate, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
-                        Text(
-                            "${uiState.selectedPlateHistory.size} observations • max theoretical radius ${uiState.theoreticalRadiusMeters.toInt()} m",
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    AssistChip(
+                        onClick = { },
+                        label = {
+                            Text("${uiState.selectedPlate} • ${uiState.selectedPlateHistory.size} obs • ${uiState.theoreticalRadiusMeters.toInt()} m")
+                        },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.25f),
+                            labelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        ),
+                    )
+                    selectedPlateLookup?.ownerChipLabel?.let { ownerChip ->
+                        AssistChip(
+                            onClick = { patenteChileLookupPlate = uiState.selectedPlate },
+                            label = { Text(ownerChip) },
                         )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = onShareSelected) {
-                            Icon(Icons.Default.Share, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Share")
-                        }
-                        TextButton(onClick = { onSelectPlate(null) }) {
-                            Text("Clear")
-                        }
+                    selectedPlateLookup?.vehicleChipLabel?.let { vehicleChip ->
+                        AssistChip(
+                            onClick = { patenteChileLookupPlate = uiState.selectedPlate },
+                            label = { Text(vehicleChip) },
+                        )
+                    }
+                    selectedPlateLookup?.colorChipLabel?.let { colorChip ->
+                        AssistChip(
+                            onClick = { patenteChileLookupPlate = uiState.selectedPlate },
+                            label = { Text("Color $colorChip") },
+                        )
+                    }
+                    AssistChip(
+                        onClick = { patenteChileLookupPlate = uiState.selectedPlate },
+                        label = { Text("PatenteChile") },
+                    )
+                    AssistChip(
+                        onClick = onShareSelected,
+                        label = { Text("Share") },
+                        leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                    )
+                    IconButton(onClick = { onSelectPlate(null) }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close plate details")
                     }
                 }
             }
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        LazyColumn(
+            modifier = Modifier.weight(1f, fill = true),
+            contentPadding = PaddingValues(bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             items(uiState.filteredSightings, key = { it.id }) { sighting ->
                 HistoryRow(
                     sighting = sighting,
-                    onClick = { onSelectPlate(sighting.plateNumber) },
+                    lookup = patenteChileLookupCache[sighting.plateNumber],
+                    isSelected = uiState.selectedPlate == sighting.plateNumber,
+                    onClick = {
+                        onSelectPlate(
+                            if (uiState.selectedPlate == sighting.plateNumber) null else sighting.plateNumber
+                        )
+                    },
+                    onOpenPatenteChile = {
+                        onSelectPlate(sighting.plateNumber)
+                        patenteChileLookupPlate = sighting.plateNumber
+                    },
                     onRetry = { onRetrySighting(sighting.clientGeneratedId) },
                     onOpenImage = { imageUri -> fullScreenImageUri = imageUri },
+                    onDeleteSighting = {
+                        onDeleteSighting(sighting.clientGeneratedId, sighting.imageUri)
+                        if (fullScreenImageUri == sighting.imageUri) {
+                            fullScreenImageUri = null
+                        }
+                    },
                     onDeleteImage = {
                         onDeleteLocalImage(sighting.clientGeneratedId, sighting.imageUri)
                         if (fullScreenImageUri == sighting.imageUri) {
@@ -1042,10 +1365,20 @@ private fun HistoryScreen(
         }
     }
 
-    fullScreenImageUri?.let { imageUri ->
+    fullScreenImageUri?.let { imageUri: String ->
         FullScreenImageDialog(
             imageUri = imageUri,
             onDismiss = { fullScreenImageUri = null },
+        )
+    }
+
+    patenteChileLookupPlate?.let { plateNumber ->
+        PatenteChileLookupDialog(
+            plateNumber = plateNumber,
+            onDismiss = { patenteChileLookupPlate = null },
+            onLookupResolved = { lookup ->
+                patenteChileLookupCache = patenteChileLookupCache + (lookup.plateNumber to lookup)
+            },
         )
     }
 }
@@ -1074,21 +1407,25 @@ private fun FilterPanel(
                     selected = uiState.repeatedOnly,
                     onClick = { onRepeatedOnlyChange(!uiState.repeatedOnly) },
                     label = { Text("Repeated only") },
+                    colors = patentIAFilterChipColors(),
                 )
                 FilterChip(
                     selected = uiState.timeFilter == TimeFilter.ALL,
                     onClick = { onTimeFilterChange(TimeFilter.ALL) },
                     label = { Text("All") },
+                    colors = patentIAFilterChipColors(),
                 )
                 FilterChip(
                     selected = uiState.timeFilter == TimeFilter.LAST_24_HOURS,
                     onClick = { onTimeFilterChange(TimeFilter.LAST_24_HOURS) },
                     label = { Text("24 h") },
+                    colors = patentIAFilterChipColors(),
                 )
                 FilterChip(
                     selected = uiState.timeFilter == TimeFilter.LAST_7_DAYS,
                     onClick = { onTimeFilterChange(TimeFilter.LAST_7_DAYS) },
                     label = { Text("7 d") },
+                    colors = patentIAFilterChipColors(),
                 )
             }
         }
@@ -1098,72 +1435,131 @@ private fun FilterPanel(
 @Composable
 private fun HistoryRow(
     sighting: PlateSighting,
+    lookup: PatenteChileLookup?,
+    isSelected: Boolean,
     onClick: () -> Unit,
+    onOpenPatenteChile: () -> Unit,
     onRetry: () -> Unit,
     onOpenImage: (String) -> Unit,
+    onDeleteSighting: () -> Unit,
     onDeleteImage: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val isImageDisplayable = remember(context, sighting.imageUri) {
+        isImageDisplayable(context, sighting.imageUri)
+    }
+    val hasAccessibleLocalImage = remember(context, sighting.imageUri) {
+        hasAccessibleLocalImage(context, sighting.imageUri)
+    }
+
     Card(
         onClick = onClick,
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (sighting.imageUri != null) {
-                AsyncImage(
-                    model = sighting.imageUri,
-                    contentDescription = sighting.plateNumber,
-                    modifier = Modifier
-                        .size(92.dp)
-                        .heightIn(min = 92.dp)
-                        .clickable { onOpenImage(sighting.imageUri) },
-                    contentScale = ContentScale.Crop,
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(92.dp)
-                        .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(16.dp)),
-                    contentAlignment = Alignment.Center,
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (isImageDisplayable) {
+                    AsyncImage(
+                        model = sighting.imageUri,
+                        contentDescription = sighting.plateNumber,
+                        modifier = Modifier
+                            .size(92.dp)
+                            .heightIn(min = 92.dp)
+                            .clickable { sighting.imageUri?.let(onOpenImage) },
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(92.dp)
+                            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(16.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Default.CloudOff, contentDescription = null)
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Icon(Icons.Default.CloudOff, contentDescription = null)
+                    Text(sighting.plateNumber, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                    Text(formatTimestamp(sighting.capturedAtEpochMillis), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        when {
+                            sighting.latitude != null && sighting.longitude != null -> "${sighting.latitude}, ${sighting.longitude}"
+                            else -> "No GPS fix"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text("Source: ${sighting.source}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(syncStateLabel(sighting), color = syncStateColor(sighting), fontWeight = FontWeight.SemiBold)
+                    sighting.syncError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    lookup?.ownerChipLabel?.let { ownerChip ->
+                        AssistChip(
+                            onClick = onOpenPatenteChile,
+                            label = { Text(ownerChip) },
+                        )
+                    }
+                    lookup?.vehicleChipLabel?.let { vehicleChip ->
+                        AssistChip(
+                            onClick = onOpenPatenteChile,
+                            label = { Text(vehicleChip) },
+                        )
+                    }
+                    lookup?.colorChipLabel?.let { colorChip ->
+                        AssistChip(
+                            onClick = onOpenPatenteChile,
+                            label = { Text("Color $colorChip") },
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(
+                            onClick = onOpenPatenteChile,
+                            label = { Text("PatenteChile") },
+                        )
+                        if (isSelected) {
+                            AssistChip(
+                                onClick = onClick,
+                                label = { Text("Hide details") },
+                            )
+                        }
+                    }
+                    if (hasAccessibleLocalImage) {
+                        TextButton(onClick = onDeleteImage) {
+                            Text("Delete local image")
+                        }
+                    }
+                    if (sighting.syncState == PlateSyncState.SYNC_ERROR.name) {
+                        OutlinedButton(onClick = onRetry) {
+                            Icon(Icons.Default.Sync, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Retry upload")
+                        }
+                    }
                 }
             }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+
+            IconButton(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp),
+                onClick = onDeleteSighting,
             ) {
-                Text(sighting.plateNumber, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                Text(formatTimestamp(sighting.capturedAtEpochMillis), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(
-                    when {
-                        sighting.latitude != null && sighting.longitude != null -> "${sighting.latitude}, ${sighting.longitude}"
-                        else -> "No GPS fix"
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Delete history entry",
                 )
-                Text("Source: ${sighting.source}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(syncStateLabel(sighting), color = syncStateColor(sighting), fontWeight = FontWeight.SemiBold)
-                sighting.syncError?.let {
-                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (isLocalImageUri(sighting.imageUri)) {
-                    TextButton(onClick = onDeleteImage) {
-                        Text("Delete local image")
-                    }
-                }
-                if (sighting.syncState == PlateSyncState.SYNC_ERROR.name) {
-                    OutlinedButton(onClick = onRetry) {
-                        Icon(Icons.Default.Sync, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Retry upload")
-                    }
-                }
             }
         }
     }
@@ -1200,11 +1596,168 @@ private fun FullScreenImageDialog(
     }
 }
 
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun PatenteChileLookupDialog(
+    plateNumber: String,
+    onDismiss: () -> Unit,
+    onLookupResolved: (PatenteChileLookup) -> Unit,
+) {
+    val context = LocalContext.current
+    var isLoading by rememberSaveable(plateNumber) { mutableStateOf(true) }
+    var searchTriggered by rememberSaveable(plateNumber) { mutableStateOf(false) }
+    var lookupResolved by rememberSaveable(plateNumber) { mutableStateOf(false) }
+    val normalizedPlate = remember(plateNumber) {
+        plateNumber.trim().uppercase()
+    }
+    val searchScript = remember(normalizedPlate) {
+        buildPatenteChileAutofillScript(normalizedPlate)
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .navigationBarsPadding(),
+            shape = RoundedCornerShape(28.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text("PatenteChile lookup", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text(
+                            text = "Public web search for $normalizedPlate",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { openBrowserUrl(context, PATENTE_CHILE_HOME_URL) }) {
+                            Text("Browser")
+                        }
+                        TextButton(onClick = onDismiss) {
+                            Text("Close")
+                        }
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp)
+                        .padding(bottom = 12.dp),
+                ) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { webContext ->
+                            WebView(webContext).apply {
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                settings.javaScriptCanOpenWindowsAutomatically = false
+                                settings.setSupportMultipleWindows(false)
+                                webViewClient = object : WebViewClient() {
+                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                                        return false
+                                    }
+
+                                    override fun onPageFinished(view: WebView, url: String) {
+                                        val normalizedUrl = url.substringBefore('#').removeSuffix("/")
+                                        if (!searchTriggered && normalizedUrl == PATENTE_CHILE_HOME_URL.removeSuffix("/")) {
+                                            searchTriggered = true
+                                            view.evaluateJavascript(searchScript, null)
+                                            return
+                                        }
+                                        if (!lookupResolved) {
+                                            attemptPatenteChileLookupExtraction(
+                                                webView = view,
+                                                plateNumber = normalizedPlate,
+                                                onLookupResolved = { lookup ->
+                                                    lookupResolved = true
+                                                    onLookupResolved(lookup)
+                                                },
+                                                onFinished = {
+                                                    isLoading = false
+                                                },
+                                            )
+                                        } else {
+                                            isLoading = false
+                                        }
+                                    }
+                                }
+                                loadUrl(PATENTE_CHILE_HOME_URL)
+                            }
+                        },
+                    )
+
+                    if (isLoading) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0xA0000000)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                CircularProgressIndicator()
+                                Text("Running PatenteChile search", color = Color.White)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 private fun isLocalImageUri(imageUri: String?): Boolean {
     if (imageUri.isNullOrBlank()) {
         return false
     }
-    return !(imageUri.startsWith("https://") || imageUri.startsWith("gs://"))
+    return !isRemoteImageUri(imageUri)
+}
+
+private fun isRemoteImageUri(imageUri: String?): Boolean {
+    if (imageUri.isNullOrBlank()) {
+        return false
+    }
+    return imageUri.startsWith("https://") || imageUri.startsWith("gs://")
+}
+
+private fun isImageDisplayable(context: Context, imageUri: String?): Boolean {
+    if (imageUri.isNullOrBlank()) {
+        return false
+    }
+    if (isRemoteImageUri(imageUri)) {
+        return true
+    }
+
+    val parsedUri = runCatching { Uri.parse(imageUri) }.getOrNull()
+    return when (parsedUri?.scheme) {
+        null, "" -> File(imageUri).exists()
+        "file" -> parsedUri.path?.let(::File)?.exists() == true
+        "content" -> runCatching {
+            context.contentResolver.openAssetFileDescriptor(parsedUri, "r")?.use { true } ?: false
+        }.getOrDefault(false)
+        else -> false
+    }
+}
+
+private fun hasAccessibleLocalImage(context: Context, imageUri: String?): Boolean {
+    return isLocalImageUri(imageUri) && isImageDisplayable(context, imageUri)
 }
 
 private fun syncHeadline(syncDiagnostics: SyncDiagnostics, fallbackStatus: String): String {
@@ -1216,6 +1769,41 @@ private fun syncHeadline(syncDiagnostics: SyncDiagnostics, fallbackStatus: Strin
         syncDiagnostics.isSignedIn -> "Shared group ${syncDiagnostics.activeGroupId ?: "-"}"
         else -> fallbackStatus
     }
+}
+
+private fun gpsStatusLabel(locationStatus: LocationStatus): String = when (locationStatus) {
+    LocationStatus.CHECKING -> "Checking GPS"
+    LocationStatus.READY -> "GPS ready"
+    LocationStatus.WAITING_FOR_FIX -> "Waiting for GPS fix"
+    LocationStatus.DISABLED -> "GPS disabled"
+}
+
+private fun gpsStatusDetail(
+    locationStatus: LocationStatus,
+    currentLocation: GeoPoint?,
+): String = when (locationStatus) {
+    LocationStatus.CHECKING -> "Refreshing location status now. Tap again if you want to retry."
+    LocationStatus.READY -> currentLocation?.let {
+        "Current fix ${"%.5f".format(it.latitude)}, ${"%.5f".format(it.longitude)}. Tap the chip to refresh."
+    } ?: "Location services are available. Tap the chip to refresh."
+    LocationStatus.WAITING_FOR_FIX -> "Location services are enabled, but no GPS fix is available yet. Tap the chip to retry."
+    LocationStatus.DISABLED -> "Android location services are off or unavailable on this device. Tap the chip after enabling them."
+}
+
+@Composable
+private fun gpsStatusContainerColor(locationStatus: LocationStatus): Color = when (locationStatus) {
+    LocationStatus.READY -> Color(0xFFDDF5E8)
+    LocationStatus.WAITING_FOR_FIX -> Color(0xFFFFF2D9)
+    LocationStatus.DISABLED -> Color(0xFFFFE1E1)
+    LocationStatus.CHECKING -> MaterialTheme.colorScheme.surfaceVariant
+}
+
+@Composable
+private fun gpsStatusContentColor(locationStatus: LocationStatus): Color = when (locationStatus) {
+    LocationStatus.READY -> Color(0xFF0C6B3D)
+    LocationStatus.WAITING_FOR_FIX -> Color(0xFF8A5A00)
+    LocationStatus.DISABLED -> Color(0xFF9B1C1C)
+    LocationStatus.CHECKING -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
 private fun driverSummaryText(syncDiagnostics: SyncDiagnostics): String {
@@ -1292,7 +1880,7 @@ private fun capturePhoto(
     onImageCaptured: (Uri, String) -> Unit,
     onCaptureError: (String) -> Unit,
 ) {
-    val outputFile = createImageFile(context)
+    val outputFile = AppImageStore(context).createImageFile()
     val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
     val mainExecutor = ContextCompat.getMainExecutor(context)
 
@@ -1316,13 +1904,252 @@ private fun capturePhoto(
     )
 }
 
-private fun createImageFile(context: Context): File {
-    val imagesDirectory = File(context.cacheDir, "images").apply { mkdirs() }
-    return File(imagesDirectory, "capture_${System.currentTimeMillis()}.jpg")
-}
-
 private fun isPermissionGranted(context: Context, permission: String): Boolean {
     return ContextCompat.checkSelfPermission(context, permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
+}
+
+private fun buildPatenteChileAutofillScript(plateNumber: String): String {
+    val escapedPlate = plateNumber
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+
+    return """
+        (function() {
+            const plate = '$escapedPlate';
+            const normalizeInput = () => {
+                const input = document.getElementById('inputTerm');
+                const searchType = document.getElementById('searchType');
+                if (!input) {
+                    return null;
+                }
+                if (searchType) {
+                    searchType.value = 'vehiculo';
+                }
+                input.value = plate;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+                input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+                return input;
+            };
+
+            const tryNativeSearch = () => {
+                if (typeof window.a0_0x50ec1e === 'function') {
+                    window.a0_0x50ec1e();
+                    return true;
+                }
+                return false;
+            };
+
+            const tryButtonSearch = () => {
+                const button = document.getElementById('searchBtn');
+                if (!button) {
+                    return false;
+                }
+                button.focus();
+                button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                button.click();
+                return true;
+            };
+
+            const triggerSearch = () => {
+                const input = normalizeInput();
+                if (!input) {
+                    return false;
+                }
+                if (tryNativeSearch()) {
+                    return true;
+                }
+                if (tryButtonSearch()) {
+                    return true;
+                }
+                input.focus();
+                return true;
+            };
+
+            if (triggerSearch()) {
+                return true;
+            }
+
+            let attempts = 0;
+            const intervalId = setInterval(() => {
+                attempts += 1;
+                if (triggerSearch() || attempts >= 80) {
+                    clearInterval(intervalId);
+                }
+            }, 250);
+            return true;
+        })();
+    """.trimIndent()
+}
+
+private fun buildPatenteChileExtractionScript(plateNumber: String): String {
+    val escapedPlate = plateNumber
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+
+    return """
+        (function() {
+            const expectedPlate = '$escapedPlate';
+            const normalize = (value) => (value || '')
+                .replace(/\u00a0/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+            const lines = rawText.split(/\n+/).map(normalize).filter(Boolean);
+            const pairs = [];
+
+            document.querySelectorAll('table tr').forEach((row) => {
+                const cells = Array.from(row.querySelectorAll('th, td'))
+                    .map((cell) => normalize(cell.innerText || cell.textContent || ''))
+                    .filter(Boolean);
+                if (cells.length >= 2) {
+                    pairs.push([cells[0], normalize(cells.slice(1).join(' '))]);
+                }
+            });
+
+            document.querySelectorAll('dl').forEach((list) => {
+                const terms = Array.from(list.querySelectorAll('dt'));
+                terms.forEach((term) => {
+                    const valueNode = term.nextElementSibling;
+                    if (!valueNode) {
+                        return;
+                    }
+                    const label = normalize(term.innerText || term.textContent || '');
+                    const value = normalize(valueNode.innerText || valueNode.textContent || '');
+                    if (label && value) {
+                        pairs.push([label, value]);
+                    }
+                });
+            });
+
+            lines.forEach((line) => {
+                const match = line.match(/^([^:]{2,60}):\s*(.+)$/);
+                if (match) {
+                    pairs.push([normalize(match[1]), normalize(match[2])]);
+                }
+            });
+
+            const findPair = (keywords) => {
+                for (const [label, value] of pairs) {
+                    const normalizedLabel = normalize(label).toLowerCase();
+                    if (!value) {
+                        continue;
+                    }
+                    if (keywords.some((keyword) => normalizedLabel.includes(keyword))) {
+                        return value;
+                    }
+                }
+                return '';
+            };
+
+            const findByPatterns = (patterns) => {
+                for (const pattern of patterns) {
+                    for (const line of lines) {
+                        const match = line.match(pattern);
+                        if (match && match[1]) {
+                            return normalize(match[1]);
+                        }
+                    }
+                    const block = rawText.match(pattern);
+                    if (block && block[1]) {
+                        return normalize(block[1]);
+                    }
+                }
+                return '';
+            };
+
+            const ownerName = findPair(['propietario', 'dueño', 'dueno', 'titular', 'nombre del propietario', 'nombre del titular']) ||
+                findByPatterns([
+                    /(?:nombre(?: del)?(?: propietario| titular| dueño| dueno)?|propietario|dueño|dueno|titular)\s*:?\s*([^\n]+)/i,
+                ]);
+            const ownerRut = findPair(['rut propietario', 'rut dueño', 'rut dueno', 'rut titular', 'rut']) ||
+                findByPatterns([
+                    /(?:rut(?: del)?(?: propietario| dueño| dueno| titular)?)\s*:?\s*([^\n]+)/i,
+                    /(\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b)/,
+                ]);
+            const vehicleMake = findPair(['marca']) || findByPatterns([/(?:marca)\s*:?\s*([^\n]+)/i]);
+            const vehicleModel = findPair(['modelo']) || findByPatterns([/(?:modelo)\s*:?\s*([^\n]+)/i]);
+            const vehicleYear = findPair(['año', 'ano']) || findByPatterns([/(?:año|ano)\s*:?\s*([^\n]+)/i]);
+            const vehicleColor = findPair(['color']) || findByPatterns([/(?:color)\s*:?\s*([^\n]+)/i]);
+            const resolvedPlate = findPair(['patente', 'ppu']) ||
+                findByPatterns([/(?:patente|ppu)\s*:?\s*([^\n]+)/i]) ||
+                expectedPlate;
+
+            return JSON.stringify({
+                plateNumber: normalize(resolvedPlate || expectedPlate).toUpperCase(),
+                ownerName: normalize(ownerName),
+                ownerRut: normalize(ownerRut).toUpperCase(),
+                vehicleMake: normalize(vehicleMake),
+                vehicleModel: normalize(vehicleModel),
+                vehicleYear: normalize(vehicleYear),
+                vehicleColor: normalize(vehicleColor),
+            });
+        })();
+    """.trimIndent()
+}
+
+private fun attemptPatenteChileLookupExtraction(
+    webView: WebView,
+    plateNumber: String,
+    onLookupResolved: (PatenteChileLookup) -> Unit,
+    onFinished: () -> Unit,
+    remainingAttempts: Int = 8,
+) {
+    webView.evaluateJavascript(buildPatenteChileExtractionScript(plateNumber)) { rawResult ->
+        val lookup = parsePatenteChileLookupResult(rawResult)
+        if (lookup != null && lookup.hasMeaningfulData()) {
+            onLookupResolved(lookup)
+            onFinished()
+            return@evaluateJavascript
+        }
+
+        if (remainingAttempts > 1) {
+            webView.postDelayed(
+                {
+                    attemptPatenteChileLookupExtraction(
+                        webView = webView,
+                        plateNumber = plateNumber,
+                        onLookupResolved = onLookupResolved,
+                        onFinished = onFinished,
+                        remainingAttempts = remainingAttempts - 1,
+                    )
+                },
+                750,
+            )
+        } else {
+            onFinished()
+        }
+    }
+}
+
+private fun parsePatenteChileLookupResult(rawResult: String?): PatenteChileLookup? {
+    if (rawResult.isNullOrBlank() || rawResult == "null") {
+        return null
+    }
+
+    val decodedResult = runCatching {
+        JSONArray("[$rawResult]").getString(0)
+    }.getOrNull() ?: return null
+
+    val jsonObject = runCatching { JSONObject(decodedResult) }.getOrNull() ?: return null
+    val lookup = PatenteChileLookup(
+        plateNumber = jsonObject.optString("plateNumber").trim().ifBlank { return null },
+        ownerName = jsonObject.optString("ownerName").trim().ifBlank { null },
+        ownerRut = jsonObject.optString("ownerRut").trim().ifBlank { null },
+        vehicleMake = jsonObject.optString("vehicleMake").trim().ifBlank { null },
+        vehicleModel = jsonObject.optString("vehicleModel").trim().ifBlank { null },
+        vehicleYear = jsonObject.optString("vehicleYear").trim().ifBlank { null },
+        vehicleColor = jsonObject.optString("vehicleColor").trim().ifBlank { null },
+    )
+
+    return lookup.takeIf { it.hasMeaningfulData() }
+}
+
+private fun openBrowserUrl(context: Context, url: String) {
+    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
 }
 
 private fun shareText(context: Context, text: String) {
@@ -1337,6 +2164,28 @@ private fun formatTimestamp(epochMillis: Long): String {
     val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     return formatter.format(Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault()))
 }
+
+private fun formatVersionLabel(versionName: String?, versionCode: Long?): String {
+    val safeVersionName = versionName?.takeIf { it.isNotBlank() } ?: "unknown"
+    val safeVersionCode = versionCode?.takeIf { it > 0 }?.toString() ?: "-"
+    return "$safeVersionName ($safeVersionCode)"
+}
+
+private fun formatByteCountSuffix(bytes: Long?): String {
+    val safeBytes = bytes?.takeIf { it > 0 } ?: return ""
+    val sizeInMegabytes = safeBytes.toDouble() / (1024.0 * 1024.0)
+    return " • ${"%.1f".format(sizeInMegabytes)} MB"
+}
+
+@Composable
+private fun patentIAFilterChipColors() = FilterChipDefaults.filterChipColors(
+    selectedContainerColor = MaterialTheme.colorScheme.primary,
+    selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+    selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimary,
+    selectedTrailingIconColor = MaterialTheme.colorScheme.onPrimary,
+)
+
+private const val PATENTE_CHILE_HOME_URL = "https://www.patentechile.com/"
 
 private val patentIAColorScheme = androidx.compose.material3.darkColorScheme(
     primary = Color(0xFF5AD1B2),

@@ -36,4 +36,9 @@ class NoOpRemoteSightingSyncDataSource(
             errorMessage = "Firebase not configured in this build",
         )
     }
+
+    override suspend fun deleteSighting(
+        session: RemoteSyncSession,
+        sighting: PlateSighting,
+    ): String? = "Firebase not configured in this build"
 }

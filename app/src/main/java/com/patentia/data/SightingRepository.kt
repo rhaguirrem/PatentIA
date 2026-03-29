@@ -93,7 +93,7 @@ class SightingRepository(
 
     suspend fun syncPendingSightings(clientGeneratedIds: List<String>? = null) {
         if (!remoteSyncDataSource.isConfigured) {
-            refreshDiagnostics()
+            refreshDiagnostics(lastError = null, lastWarning = null)
             return
         }
 
@@ -119,7 +119,10 @@ class SightingRepository(
         }
 
         if (pendingSightings.isEmpty()) {
-            refreshDiagnostics(lastSyncAtEpochMillis = syncDiagnostics.value.lastSyncAtEpochMillis)
+            refreshDiagnostics(
+                lastSyncAtEpochMillis = syncDiagnostics.value.lastSyncAtEpochMillis,
+                lastError = null,
+            )
             return
         }
 
@@ -171,6 +174,10 @@ class SightingRepository(
     }
 
     suspend fun switchActiveGroup(groupId: String) {
+        if (!remoteSyncDataSource.isConfigured) {
+            refreshDiagnostics(lastError = null, lastWarning = null)
+            return
+        }
         val nextSession = remoteSyncDataSource.ensureSession(groupId)
         activeSession = nextSession.copy(
             availableGroups = remoteSyncDataSource.listGroups(nextSession),
@@ -181,7 +188,7 @@ class SightingRepository(
 
     suspend fun joinOrCreateGroup(groupId: String) {
         if (!remoteSyncDataSource.isConfigured) {
-            refreshDiagnostics(lastError = "Firebase not configured in this build")
+            refreshDiagnostics(lastError = null, lastWarning = null)
             return
         }
         val session = if (activeSession.isAvailable) activeSession else remoteSyncDataSource.ensureSession(activeSession.groupId)
@@ -190,6 +197,49 @@ class SightingRepository(
     }
 
     suspend fun removeLocalImage(clientGeneratedId: String, imageUri: String?) {
+        val sighting = dao.getByClientGeneratedIds(listOf(clientGeneratedId)).firstOrNull()
+
+        deleteLocalImageFile(imageUri)
+
+        val shouldDeleteLocalRecord = sighting != null && sighting.remoteId == null && sighting.syncState != PlateSyncState.SYNCED.name
+        if (shouldDeleteLocalRecord) {
+            dao.deleteByClientGeneratedId(clientGeneratedId)
+        } else {
+            dao.clearImageUri(
+                clientGeneratedId = clientGeneratedId,
+                updatedAtEpochMillis = System.currentTimeMillis(),
+            )
+        }
+
+        refreshDiagnostics()
+    }
+
+    suspend fun deleteSighting(clientGeneratedId: String, imageUri: String?): String? {
+        val sighting = dao.getByClientGeneratedIds(listOf(clientGeneratedId)).firstOrNull()
+            ?: return "History entry no longer exists"
+
+        deleteLocalImageFile(imageUri)
+
+        val remoteDeleteError = if (!sighting.remoteId.isNullOrBlank()) {
+            if (!activeSession.isAvailable) {
+                activeSession = remoteSyncDataSource.ensureSession(sighting.groupId ?: activeSession.groupId)
+            }
+            remoteSyncDataSource.deleteSighting(activeSession, sighting)
+        } else {
+            null
+        }
+
+        if (remoteDeleteError != null) {
+            refreshDiagnostics(lastError = remoteDeleteError)
+            return remoteDeleteError
+        }
+
+        dao.deleteByClientGeneratedId(clientGeneratedId)
+        refreshDiagnostics(lastError = null)
+        return null
+    }
+
+    private fun deleteLocalImageFile(imageUri: String?) {
         imageUri?.let { uriString ->
             val uri = runCatching { Uri.parse(uriString) }.getOrNull()
             if (uri != null && uri.scheme == "file") {
@@ -199,11 +249,6 @@ class SightingRepository(
                 }
             }
         }
-
-        dao.clearImageUri(
-            clientGeneratedId = clientGeneratedId,
-            updatedAtEpochMillis = System.currentTimeMillis(),
-        )
     }
 
     private fun restartRealtimeSync() {

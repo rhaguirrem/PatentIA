@@ -33,4 +33,34 @@ class PlateRecognizerTest {
 
         assertEquals("ABCD58", ranked.first())
     }
+
+    @Test
+    fun `rankPlateCandidates rebuilds fragmented plate segments from OCR noise`() {
+        val ranked = recognizer.rankPlateCandidates(
+            rawText = "TOYOTA YARIS CX DL 88",
+            lines = listOf(
+                RecognizedTextLine(
+                    text = "TOYOTA YARIS CX DL 88",
+                    fragments = listOf("TOYOTA", "YARIS", "CX", "DL", "88"),
+                )
+            ),
+        )
+
+        assertEquals("CXDL88", ranked.first())
+    }
+
+    @Test
+    fun `rankPlateCandidates rebuilds plates split into multiple short OCR tokens`() {
+        val ranked = recognizer.rankPlateCandidates(
+            rawText = "CX D L 88",
+            lines = listOf(
+                RecognizedTextLine(
+                    text = "CX D L 88",
+                    fragments = listOf("CX", "D", "L", "88"),
+                )
+            ),
+        )
+
+        assertEquals("CXDL88", ranked.first())
+    }
 }

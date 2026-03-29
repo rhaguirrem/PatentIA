@@ -1,7 +1,13 @@
 package com.patentia.services
 
-import android.graphics.Rect
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.ImageDecoder
+import android.graphics.Paint
+import android.graphics.Rect
 import android.net.Uri
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
@@ -9,6 +15,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.tasks.await
 import kotlin.math.abs
+import kotlin.math.max
 
 data class PlateRecognition(
     val plates: List<String>,
@@ -21,6 +28,17 @@ internal data class RecognizedTextLine(
     val bounds: Rect? = null,
     val imageWidth: Int? = null,
     val imageHeight: Int? = null,
+)
+
+private data class RecognitionPass(
+    val rawText: String,
+    val lines: List<RecognizedTextLine>,
+    val sourceBoost: Int,
+)
+
+private data class FocusCrop(
+    val bitmap: Bitmap,
+    val sourceBoost: Int,
 )
 
 class PlateRecognizer {
@@ -46,14 +64,30 @@ class PlateRecognizer {
     )
 
     suspend fun recognize(context: Context, imageUri: Uri): PlateRecognition {
-        val inputImage = InputImage.fromFilePath(context, imageUri)
-        val result = recognizer.process(inputImage).await()
-        val rawText = result.text.orEmpty()
+        val originalImage = InputImage.fromFilePath(context, imageUri)
+        val originalResult = recognizer.process(originalImage).await()
+        val recognitionPasses = mutableListOf(
+            RecognitionPass(
+                rawText = originalResult.text.orEmpty(),
+                lines = originalResult.toRecognizedLines(originalImage.width, originalImage.height),
+                sourceBoost = 0,
+            )
+        )
+
+        decodeBitmap(context, imageUri)?.let { decodedBitmap ->
+            val normalizedBitmap = scaleBitmap(decodedBitmap)
+            val enhancedBitmap = enhanceBitmap(normalizedBitmap)
+
+            recognitionPasses += runAdditionalPass(enhancedBitmap, sourceBoost = 10)
+            buildFocusCrops(enhancedBitmap).forEach { focusCrop ->
+                recognitionPasses += runAdditionalPass(focusCrop.bitmap, sourceBoost = focusCrop.sourceBoost)
+            }
+        }
+
+        val rawText = recognitionPasses.joinToString(separator = "\n") { it.rawText }
+            .trim()
         return PlateRecognition(
-            plates = rankPlateCandidates(
-                rawText = rawText,
-                lines = result.toRecognizedLines(inputImage.width, inputImage.height),
-            ),
+            plates = rankPlateCandidates(recognitionPasses),
             rawText = rawText,
         )
     }
@@ -62,31 +96,32 @@ class PlateRecognizer {
         rawText: String,
         lines: List<RecognizedTextLine> = emptyList(),
     ): List<String> {
+        return rankPlateCandidates(
+            listOf(
+                RecognitionPass(
+                    rawText = rawText,
+                    lines = lines,
+                    sourceBoost = 0,
+                )
+            )
+        )
+    }
+
+    private fun rankPlateCandidates(
+        passes: List<RecognitionPass>,
+    ): List<String> {
         val scoredCandidates = linkedMapOf<String, Int>()
 
-        lines.forEach { line ->
-            val lineBoost = scoreLinePlacement(line)
-            extractCandidatesFromSnippet(line.text).forEach { candidate ->
-                registerCandidate(scoredCandidates, candidate, 30 + lineBoost)
+        passes.forEach { pass ->
+            val passScores = scoreCandidates(
+                rawText = pass.rawText,
+                lines = pass.lines,
+                sourceBoost = pass.sourceBoost,
+            )
+            passScores.forEach { (candidate, score) ->
+                val mergedScore = score + (if (scoredCandidates.containsKey(candidate)) 24 else 0)
+                scoredCandidates[candidate] = max(scoredCandidates[candidate] ?: Int.MIN_VALUE, mergedScore)
             }
-
-            line.fragments.forEach { fragment ->
-                extractCandidatesFromSnippet(fragment).forEach { candidate ->
-                    registerCandidate(scoredCandidates, candidate, 18 + lineBoost)
-                }
-            }
-
-            line.fragments.windowed(size = 2, step = 1, partialWindows = false)
-                .map { it.joinToString(separator = "") }
-                .forEach { merged ->
-                    extractCandidatesFromSnippet(merged).forEach { candidate ->
-                        registerCandidate(scoredCandidates, candidate, 16 + lineBoost)
-                    }
-                }
-        }
-
-        extractCandidatesFromSnippet(rawText).forEach { candidate ->
-            registerCandidate(scoredCandidates, candidate, 10)
         }
 
         val ranked = scoredCandidates.entries
@@ -100,21 +135,81 @@ class PlateRecognizer {
             .take(3)
     }
 
+    private fun scoreCandidates(
+        rawText: String,
+        lines: List<RecognizedTextLine>,
+        sourceBoost: Int,
+    ): Map<String, Int> {
+        val scoredCandidates = linkedMapOf<String, Int>()
+
+        lines.forEach { line ->
+            val lineBoost = scoreLinePlacement(line)
+            extractCandidatesFromSnippet(line.text).forEach { candidate ->
+                registerCandidate(scoredCandidates, candidate, 30 + lineBoost + sourceBoost)
+            }
+
+            line.fragments.forEach { fragment ->
+                extractCandidatesFromSnippet(fragment).forEach { candidate ->
+                    registerCandidate(scoredCandidates, candidate, 18 + lineBoost + sourceBoost)
+                }
+            }
+
+            line.fragments.windowed(size = 2, step = 1, partialWindows = false)
+                .map { it.joinToString(separator = "") }
+                .forEach { merged ->
+                    extractCandidatesFromSnippet(merged).forEach { candidate ->
+                        registerCandidate(scoredCandidates, candidate, 16 + lineBoost + sourceBoost)
+                    }
+                }
+        }
+
+        extractCandidatesFromSnippet(rawText).forEach { candidate ->
+            registerCandidate(scoredCandidates, candidate, 10 + sourceBoost)
+        }
+
+        return scoredCandidates
+    }
+
     private fun extractCandidatesFromSnippet(text: String): List<String> {
         val cleaned = normalizeText(text)
         if (cleaned.isBlank()) {
             return emptyList()
         }
 
-        val directTokens = tokenPattern.findAll(cleaned).map { it.value }.toList()
-        val splitTokens = cleaned.split(Regex("\\s+"))
+        val normalizedSegments = cleaned.split(Regex("\\s+"))
             .filter { it.isNotBlank() }
-            .flatMap { tokenPattern.findAll(it).map { match -> match.value }.toList() }
 
-        return (directTokens + splitTokens)
+        val directTokens = tokenPattern.findAll(cleaned).map { it.value }.toList()
+        val splitTokens = normalizedSegments
+            .flatMap { tokenPattern.findAll(it).map { match -> match.value }.toList() }
+        val segmentedTokens = buildSegmentCandidates(normalizedSegments)
+
+        return (directTokens + splitTokens + segmentedTokens)
             .map(::normalizePlateLikeToken)
             .filterNotNull()
             .distinct()
+    }
+
+    private fun buildSegmentCandidates(segments: List<String>): List<String> {
+        if (segments.isEmpty()) {
+            return emptyList()
+        }
+
+        val candidates = mutableListOf<String>()
+        segments.indices.forEach { startIndex ->
+            val builder = StringBuilder()
+            for (endIndex in startIndex until segments.size) {
+                builder.append(segments[endIndex])
+                val merged = builder.toString()
+                if (merged.length > 8) {
+                    break
+                }
+                if (merged.length >= 5 && merged.any(Char::isLetter) && merged.any(Char::isDigit)) {
+                    candidates += merged
+                }
+            }
+        }
+        return candidates
     }
 
     private fun registerCandidate(
@@ -238,6 +333,137 @@ class PlateRecognizer {
         }
 
         return horizontalScore + verticalScore + aspectScore
+    }
+
+    private suspend fun runAdditionalPass(
+        bitmap: Bitmap,
+        sourceBoost: Int,
+    ): RecognitionPass {
+        val inputImage = InputImage.fromBitmap(bitmap, 0)
+        val result = recognizer.process(inputImage).await()
+        return RecognitionPass(
+            rawText = result.text.orEmpty(),
+            lines = result.toRecognizedLines(bitmap.width, bitmap.height),
+            sourceBoost = sourceBoost,
+        )
+    }
+
+    private fun decodeBitmap(context: Context, imageUri: Uri): Bitmap? {
+        return runCatching {
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, imageUri)) { decoder, _, _ ->
+                decoder.isMutableRequired = true
+            }
+        }.getOrNull()
+    }
+
+    private fun scaleBitmap(bitmap: Bitmap, maxDimension: Int = 1600): Bitmap {
+        val largestDimension = max(bitmap.width, bitmap.height)
+        if (largestDimension <= maxDimension) {
+            return bitmap
+        }
+
+        val scale = maxDimension.toFloat() / largestDimension.toFloat()
+        val scaledWidth = (bitmap.width * scale).toInt().coerceAtLeast(1)
+        val scaledHeight = (bitmap.height * scale).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
+    }
+
+    private fun enhanceBitmap(bitmap: Bitmap): Bitmap {
+        val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val saturationMatrix = ColorMatrix().apply { setSaturation(0f) }
+        val contrast = 1.45f
+        val translate = (-0.5f * contrast + 0.5f) * 255f
+        val contrastMatrix = ColorMatrix(
+            floatArrayOf(
+                contrast, 0f, 0f, 0f, translate,
+                0f, contrast, 0f, 0f, translate,
+                0f, 0f, contrast, 0f, translate,
+                0f, 0f, 0f, 1f, 0f,
+            )
+        )
+        saturationMatrix.postConcat(contrastMatrix)
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            colorFilter = ColorMatrixColorFilter(saturationMatrix)
+            isFilterBitmap = true
+        }
+
+        Canvas(output).drawBitmap(bitmap, 0f, 0f, paint)
+        return output
+    }
+
+    private fun buildFocusCrops(bitmap: Bitmap): List<FocusCrop> {
+        if (bitmap.width < 80 || bitmap.height < 80) {
+            return emptyList()
+        }
+
+        return listOfNotNull(
+            cropFocusArea(
+                bitmap = bitmap,
+                widthFraction = 0.82f,
+                heightFraction = 0.38f,
+                topFraction = 0.34f,
+                sourceBoost = 18,
+            ),
+            cropFocusArea(
+                bitmap = bitmap,
+                widthFraction = 0.68f,
+                heightFraction = 0.24f,
+                topFraction = 0.56f,
+                sourceBoost = 26,
+            ),
+            cropFocusArea(
+                bitmap = bitmap,
+                widthFraction = 0.54f,
+                heightFraction = 0.22f,
+                topFraction = 0.56f,
+                horizontalBias = -0.12f,
+                sourceBoost = 24,
+            ),
+            cropFocusArea(
+                bitmap = bitmap,
+                widthFraction = 0.54f,
+                heightFraction = 0.22f,
+                topFraction = 0.56f,
+                horizontalBias = 0.12f,
+                sourceBoost = 24,
+            ),
+        )
+    }
+
+    private fun cropFocusArea(
+        bitmap: Bitmap,
+        widthFraction: Float,
+        heightFraction: Float,
+        topFraction: Float,
+        horizontalBias: Float = 0f,
+        sourceBoost: Int,
+    ): FocusCrop? {
+        val cropWidth = (bitmap.width * widthFraction).toInt().coerceAtLeast(1)
+        val cropHeight = (bitmap.height * heightFraction).toInt().coerceAtLeast(1)
+        if (cropWidth >= bitmap.width || cropHeight >= bitmap.height) {
+            return null
+        }
+
+        val centeredLeft = ((bitmap.width - cropWidth) / 2f) + (bitmap.width * horizontalBias)
+        val left = centeredLeft.toInt().coerceIn(0, bitmap.width - cropWidth)
+        val top = (bitmap.height * topFraction).toInt().coerceIn(0, bitmap.height - cropHeight)
+        val croppedBitmap = Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight)
+        return FocusCrop(
+            bitmap = upscaleBitmap(croppedBitmap),
+            sourceBoost = sourceBoost,
+        )
+    }
+
+    private fun upscaleBitmap(bitmap: Bitmap, minWidth: Int = 1400): Bitmap {
+        if (bitmap.width >= minWidth) {
+            return bitmap
+        }
+
+        val scale = minWidth.toFloat() / bitmap.width.toFloat().coerceAtLeast(1f)
+        val scaledWidth = (bitmap.width * scale).toInt().coerceAtLeast(bitmap.width)
+        val scaledHeight = (bitmap.height * scale).toInt().coerceAtLeast(bitmap.height)
+        return Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
     }
 
     private fun letterNormalization(character: Char): Char = when (character) {

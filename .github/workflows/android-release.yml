@@ -1,10 +1,17 @@
 name: Android Release
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   release:
@@ -43,6 +50,17 @@ jobs:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           echo "MAPS_API_KEY=$MAPS_API_KEY_VALUE" >> local.properties
 
+      - name: Derive release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          VERSION_NAME=$(grep -oP 'val appVersionName = "\K[^"]+' app/build.gradle.kts)
+          VERSION_CODE=$(grep -oP 'val appVersionCode = \K\d+' app/build.gradle.kts)
+          TAG_NAME="release-v${VERSION_NAME}-build-${GITHUB_RUN_NUMBER}"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+
       - name: Restore Firebase config when available
         env:
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
@@ -79,3 +97,16 @@ jobs:
         with:
           name: PatentIA-release-aab
           path: app/build/outputs/bundle/release/*.aab
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: PatentIA ${{ steps.release_meta.outputs.version_name }} build ${{ github.run_number }}
+          generate_release_notes: true
+          make_latest: true
+          overwrite_files: true
+          files: |
+            app/build/outputs/apk/release/patentia-installer-release.apk
+            app/build/outputs/bundle/release/*.aab
+            docs/app-update-manifest.json

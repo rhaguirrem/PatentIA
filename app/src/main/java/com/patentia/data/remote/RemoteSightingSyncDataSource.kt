@@ -23,6 +23,11 @@ interface RemoteSightingSyncDataSource {
         session: RemoteSyncSession,
         sightings: List<PlateSighting>,
     ): List<RemoteUploadResult>
+
+    suspend fun deleteSighting(
+        session: RemoteSyncSession,
+        sighting: PlateSighting,
+    ): String?
 }
 
 data class RemoteSyncSession(

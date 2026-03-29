@@ -1,5 +1,7 @@
 import java.io.File
 import java.util.Properties
+import com.android.build.gradle.internal.api.ApkVariantOutputImpl
+import org.gradle.api.tasks.Copy
 
 plugins {
     id("com.android.application")
@@ -37,6 +39,12 @@ fun readConfig(name: String, fallback: String? = null): String? {
 
 val mapsApiKey = readConfig("MAPS_API_KEY", "REPLACE_WITH_MAPS_API_KEY") ?: "REPLACE_WITH_MAPS_API_KEY"
 val isMapsApiKeyConfigured = mapsApiKey.isNotBlank() && mapsApiKey != "REPLACE_WITH_MAPS_API_KEY"
+val defaultAppUpdatePageUrl = "https://github.com/rhaguirrem/PatentIA/releases/latest"
+val defaultAppUpdateApkUrl = "https://github.com/rhaguirrem/PatentIA/releases/latest/download/patentia-installer-release.apk"
+val defaultAppUpdateManifestUrl = "https://github.com/rhaguirrem/PatentIA/releases/latest/download/app-update-manifest.json"
+val appUpdatePageUrl = readConfig("APP_UPDATE_PAGE_URL", defaultAppUpdatePageUrl) ?: defaultAppUpdatePageUrl
+val appUpdateApkUrl = readConfig("APP_UPDATE_APK_URL", defaultAppUpdateApkUrl) ?: defaultAppUpdateApkUrl
+val appUpdateManifestUrl = readConfig("APP_UPDATE_MANIFEST_URL", defaultAppUpdateManifestUrl) ?: defaultAppUpdateManifestUrl
 val releaseKeystorePath = readConfig("ANDROID_KEYSTORE_PATH")
 val releaseKeystorePassword = readConfig("ANDROID_KEYSTORE_PASSWORD")
 val releaseKeyAlias = readConfig("ANDROID_KEY_ALIAS")
@@ -51,6 +59,13 @@ val isReleaseSigningConfigured = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
+val appVersionCode = 2
+val appVersionName = "0.1.1"
+val apkArchiveDir = File("G:/Mi unidad/Projects/PatentIA")
+val releaseApkFileName = "patentia-installer-release.apk"
+val releaseApkArchiveFileName = "patentia-installer-release-$appVersionName.apk"
+val releaseApkFile = layout.buildDirectory.file("outputs/apk/release/$releaseApkFileName")
+val updateManifestFile = rootProject.file("docs/app-update-manifest.json")
 
 android {
     namespace = "com.patentia"
@@ -60,10 +75,13 @@ android {
         applicationId = "com.patentia"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
         buildConfigField("String", "DEFAULT_FIRESTORE_GROUP_ID", "\"patentia-demo\"")
         buildConfigField("boolean", "IS_MAPS_API_KEY_CONFIGURED", isMapsApiKeyConfigured.toString())
+        buildConfigField("String", "APP_UPDATE_PAGE_URL", "\"$appUpdatePageUrl\"")
+        buildConfigField("String", "APP_UPDATE_APK_URL", "\"$appUpdateApkUrl\"")
+        buildConfigField("String", "APP_UPDATE_MANIFEST_URL", "\"$appUpdateManifestUrl\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -116,6 +134,55 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+android.applicationVariants.configureEach {
+    outputs.configureEach {
+        val outputFileName = if (name == "release") {
+            releaseApkFileName
+        } else {
+            "patentia-installer-$name.apk"
+        }
+        (this as ApkVariantOutputImpl).outputFileName = outputFileName
+    }
+}
+
+val writeUpdateManifest by tasks.registering {
+    doLast {
+        val builtReleaseApk = releaseApkFile.get().asFile
+        check(builtReleaseApk.exists()) {
+            "Release APK not found at ${builtReleaseApk.absolutePath}"
+        }
+
+        val manifestJson = """
+            {
+              "packageName": "com.patentia",
+              "versionName": "$appVersionName",
+              "versionCode": $appVersionCode,
+              "apkUrl": "$appUpdateApkUrl",
+              "pageUrl": "$appUpdatePageUrl",
+              "fileSizeBytes": ${builtReleaseApk.length()}
+            }
+        """.trimIndent() + System.lineSeparator()
+
+        updateManifestFile.parentFile.mkdirs()
+        updateManifestFile.writeText(manifestJson)
+    }
+}
+
+val copyReleaseArtifacts by tasks.registering(Copy::class) {
+    dependsOn(writeUpdateManifest)
+    from(releaseApkFile)
+    from(releaseApkFile) {
+        rename { releaseApkArchiveFileName }
+    }
+    from(updateManifestFile)
+    into(apkArchiveDir)
+    includeEmptyDirs = false
+}
+
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy(copyReleaseArtifacts)
 }
 
 dependencies {

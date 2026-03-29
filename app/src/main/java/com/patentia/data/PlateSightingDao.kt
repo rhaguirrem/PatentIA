@@ -91,4 +91,7 @@ interface PlateSightingDao {
         clientGeneratedId: String,
         updatedAtEpochMillis: Long,
     )
+
+    @Query("DELETE FROM plate_sightings WHERE clientGeneratedId = :clientGeneratedId")
+    suspend fun deleteByClientGeneratedId(clientGeneratedId: String)
 }
