@@ -271,7 +271,13 @@ class SightingRepository(
             syncPendingSightings()
             remoteSyncDataSource.observeSharedSightings(activeGroupId)
                 .collect { remoteSightings ->
-                    dao.insertAll(remoteSightings.map { it.toLocalEntity() })
+                    val existingSightings = dao.getByClientGeneratedIds(remoteSightings.map { it.clientGeneratedId })
+                        .associateBy { it.clientGeneratedId }
+                    dao.insertAll(
+                        remoteSightings.map { remoteSighting ->
+                            remoteSighting.toLocalEntity(existingSightings[remoteSighting.clientGeneratedId])
+                        }
+                    )
                     refreshDiagnostics(lastSyncAtEpochMillis = System.currentTimeMillis())
                 }
         }

@@ -75,20 +75,23 @@ data class RemoteUploadResult(
     val errorMessage: String? = null,
 )
 
-fun RemotePlateSighting.toLocalEntity(): PlateSighting = PlateSighting(
+fun RemotePlateSighting.toLocalEntity(
+    existing: PlateSighting? = null,
+): PlateSighting = PlateSighting(
+    id = existing?.id ?: 0,
     clientGeneratedId = clientGeneratedId,
     remoteId = remoteId,
     groupId = groupId,
     createdBy = createdBy,
     plateNumber = plateNumber,
     rawText = rawText,
-    imageUri = imageUri,
+    imageUri = imageUri ?: existing?.imageUri,
     latitude = latitude,
     longitude = longitude,
     capturedAtEpochMillis = capturedAtEpochMillis,
     updatedAtEpochMillis = updatedAtEpochMillis,
     source = source,
     syncState = PlateSyncState.SYNCED.name,
-    syncError = null,
+    syncError = existing?.syncError?.takeIf { imageUri == null },
     lastSyncedAtEpochMillis = System.currentTimeMillis(),
 )

@@ -42,7 +42,7 @@ PatentIA is an Android app scaffold written in Kotlin with Jetpack Compose for r
 5. Enable Anonymous Authentication and Cloud Firestore in Firebase. Firebase Storage is optional, and the app will fall back to metadata-only sharing when Storage is unavailable.
 6. Add `google-services.json` to `app/google-services.json`. The build is set up to apply the Google services plugin automatically when that file exists.
 7. In-app update checks default to GitHub Releases. Override `APP_UPDATE_MANIFEST_URL`, `APP_UPDATE_APK_URL`, or `APP_UPDATE_PAGE_URL` in `local.properties`, environment variables, or signing properties when you want the app to use a different shared endpoint.
-8. Every push to `main` runs the `Android Release` workflow and publishes `patentia-installer-release.apk` plus `app-update-manifest.json` as GitHub release assets. You can still run it manually with `workflow_dispatch`.
+8. Every push to `main` runs the `Android Release` workflow and publishes `patentia-installer-release.apk` plus `app-update-manifest.json` as GitHub release assets. The manifest includes a publish timestamp, so the app can detect a newer build even when the version code is unchanged. You can still run it manually with `workflow_dispatch`.
 9. Generate a Gradle wrapper from Android Studio or from a local Gradle installation.
 10. Run the app on a physical Android device with camera and GPS access.
 

@@ -27,6 +27,7 @@ class AppUpdateManager(
         val packageName: String,
         val versionName: String,
         val versionCode: Long,
+        val publishedAtEpochMillis: Long? = null,
         val fileSizeBytes: Long? = null,
     )
 
@@ -69,6 +70,7 @@ class AppUpdateManager(
             packageName = packageInfo.packageName,
             versionName = packageInfo.versionName ?: "unknown",
             versionCode = PackageInfoCompat.getLongVersionCode(packageInfo),
+            publishedAtEpochMillis = packageInfo.lastUpdateTime.takeIf { it > 0L },
         )
     }
 
@@ -81,6 +83,7 @@ class AppUpdateManager(
                 packageName = remoteManifest.packageName,
                 versionName = remoteManifest.versionName,
                 versionCode = remoteManifest.versionCode,
+                publishedAtEpochMillis = remoteManifest.publishedAtEpochMillis,
                 fileSizeBytes = remoteManifest.fileSizeBytes,
             )
 
@@ -90,7 +93,7 @@ class AppUpdateManager(
                 )
             }
 
-            if (remoteVersion.versionCode <= installedVersion.versionCode) {
+            if (!isRemoteBuildNewer(installedVersion, remoteVersion)) {
                 return@runCatching UpdateCheckResult.UpToDate(
                     remoteVersionName = remoteVersion.versionName,
                     remoteVersionCode = remoteVersion.versionCode,
@@ -220,9 +223,11 @@ class AppUpdateManager(
             }
 
             val fileSizeBytes = connection.contentLengthLong.takeIf { it > 0 } ?: destinationFile.length()
+            val lastModifiedAtEpochMillis = connection.lastModified.takeIf { it > 0L }
             return DownloadedApk(
                 file = destinationFile,
                 fileSizeBytes = fileSizeBytes,
+                lastModifiedAtEpochMillis = lastModifiedAtEpochMillis,
             )
         } finally {
             connection.disconnect()
@@ -232,12 +237,14 @@ class AppUpdateManager(
     private data class DownloadedApk(
         val file: File,
         val fileSizeBytes: Long,
+        val lastModifiedAtEpochMillis: Long? = null,
     )
 
     private data class RemoteUpdateManifest(
         val packageName: String,
         val versionName: String,
         val versionCode: Long,
+        val publishedAtEpochMillis: Long? = null,
         val apkUrl: String,
         val pageUrl: String,
         val fileSizeBytes: Long? = null,
@@ -270,6 +277,7 @@ class AppUpdateManager(
         val packageName = jsonObject.optString("packageName").trim()
         val versionName = jsonObject.optString("versionName").trim()
         val versionCode = jsonObject.optLong("versionCode")
+        val publishedAtEpochMillis = jsonObject.optLong("publishedAtEpochMillis").takeIf { it > 0L }
         val apkUrl = normalizeGoogleDriveUrl(
             jsonObject.optString("apkUrl").trim().ifBlank { BuildConfig.APP_UPDATE_APK_URL }
         )
@@ -284,6 +292,7 @@ class AppUpdateManager(
             packageName = packageName,
             versionName = versionName,
             versionCode = versionCode,
+            publishedAtEpochMillis = publishedAtEpochMillis,
             apkUrl = apkUrl,
             pageUrl = pageUrl,
             fileSizeBytes = fileSizeBytes,
@@ -293,6 +302,7 @@ class AppUpdateManager(
     private fun checkForUpdateByDownloadingApk(installedVersion: AppVersionInfo): UpdateCheckResult {
         val downloadedApk = downloadRemoteApk(BuildConfig.APP_UPDATE_APK_URL)
         val remoteVersion = readArchiveVersionInfo(downloadedApk.file)
+            ?.copy(publishedAtEpochMillis = downloadedApk.lastModifiedAtEpochMillis)
             ?: throw IOException("The shared file is not a readable Android APK.")
 
         if (remoteVersion.packageName != appContext.packageName) {
@@ -302,7 +312,7 @@ class AppUpdateManager(
             )
         }
 
-        if (remoteVersion.versionCode <= installedVersion.versionCode) {
+        if (!isRemoteBuildNewer(installedVersion, remoteVersion)) {
             downloadedApk.file.delete()
             return UpdateCheckResult.UpToDate(
                 remoteVersionName = remoteVersion.versionName,
@@ -317,6 +327,16 @@ class AppUpdateManager(
             downloadUrl = BuildConfig.APP_UPDATE_APK_URL,
             pageUrl = BuildConfig.APP_UPDATE_PAGE_URL,
         )
+    }
+
+    private fun isRemoteBuildNewer(
+        installedVersion: AppVersionInfo,
+        remoteVersion: AppVersionInfo,
+    ): Boolean {
+        val remotePublishedAt = remoteVersion.publishedAtEpochMillis
+            ?: return remoteVersion.versionCode > installedVersion.versionCode
+        val installedPublishedAt = installedVersion.publishedAtEpochMillis ?: 0L
+        return remoteVersion.versionCode >= installedVersion.versionCode && remotePublishedAt > installedPublishedAt
     }
 
     private fun openGetConnection(url: String): HttpURLConnection {

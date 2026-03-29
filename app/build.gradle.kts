@@ -153,12 +153,14 @@ val writeUpdateManifest by tasks.registering {
         check(builtReleaseApk.exists()) {
             "Release APK not found at ${builtReleaseApk.absolutePath}"
         }
+        val publishedAtEpochMillis = System.currentTimeMillis()
 
         val manifestJson = """
             {
               "packageName": "com.patentia",
               "versionName": "$appVersionName",
               "versionCode": $appVersionCode,
+                            "publishedAtEpochMillis": $publishedAtEpochMillis,
               "apkUrl": "$appUpdateApkUrl",
               "pageUrl": "$appUpdatePageUrl",
               "fileSizeBytes": ${builtReleaseApk.length()}
