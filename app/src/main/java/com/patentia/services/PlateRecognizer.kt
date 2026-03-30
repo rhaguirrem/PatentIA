@@ -2,6 +2,7 @@ package com.patentia.services
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
@@ -9,6 +10,7 @@ import android.graphics.ImageDecoder
 import android.graphics.Paint
 import android.graphics.Rect
 import android.net.Uri
+import android.os.Build
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
@@ -350,8 +352,14 @@ class PlateRecognizer {
 
     private fun decodeBitmap(context: Context, imageUri: Uri): Bitmap? {
         return runCatching {
-            ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, imageUri)) { decoder, _, _ ->
-                decoder.isMutableRequired = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, imageUri)) { decoder, _, _ ->
+                    decoder.isMutableRequired = true
+                }
+            } else {
+                context.contentResolver.openInputStream(imageUri)?.use { inputStream ->
+                    BitmapFactory.decodeStream(inputStream)?.copy(Bitmap.Config.ARGB_8888, true)
+                }
             }
         }.getOrNull()
     }

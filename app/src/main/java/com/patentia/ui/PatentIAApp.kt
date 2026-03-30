@@ -119,8 +119,6 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlinx.coroutines.delay
-import org.json.JSONArray
-import org.json.JSONObject
 
 private enum class AppPanel(val label: String) {
     Camera("Camera"),
@@ -128,34 +126,6 @@ private enum class AppPanel(val label: String) {
     Cloudsync("Cloudsync"),
     History("History"),
     About("About"),
-}
-
-private data class PatenteChileLookup(
-    val plateNumber: String,
-    val ownerName: String? = null,
-    val ownerRut: String? = null,
-    val vehicleMake: String? = null,
-    val vehicleModel: String? = null,
-    val vehicleYear: String? = null,
-    val vehicleColor: String? = null,
-) {
-    val ownerChipLabel: String?
-        get() = listOfNotNull(ownerName, ownerRut).takeIf { it.isNotEmpty() }?.joinToString(" • ")
-
-    val vehicleChipLabel: String?
-        get() = listOfNotNull(vehicleMake, vehicleModel, vehicleYear).takeIf { it.isNotEmpty() }?.joinToString(" ")
-
-    val colorChipLabel: String?
-        get() = vehicleColor
-
-    fun hasMeaningfulData(): Boolean {
-        return !ownerName.isNullOrBlank() ||
-            !ownerRut.isNullOrBlank() ||
-            !vehicleMake.isNullOrBlank() ||
-            !vehicleModel.isNullOrBlank() ||
-            !vehicleYear.isNullOrBlank() ||
-            !vehicleColor.isNullOrBlank()
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1998,8 +1968,14 @@ private fun buildPatenteChileExtractionScript(plateNumber: String): String {
                 .replace(/\s+/g, ' ')
                 .trim();
             const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+            const rawHtml = document.documentElement ? (document.documentElement.outerHTML || '') : '';
             const lines = rawText.split(/\n+/).map(normalize).filter(Boolean);
             const pairs = [];
+            const scriptPayloads = Array.from(document.querySelectorAll('script'))
+                .map((script) => normalize(script.textContent || ''))
+                .filter((scriptText) => /propiet|dueñ|duen|titular|rut|marca|modelo|año|ano|color|patente|ppu/i.test(scriptText))
+                .slice(0, 12)
+                .map((scriptText) => scriptText.slice(0, 4000));
 
             document.querySelectorAll('table tr').forEach((row) => {
                 const cells = Array.from(row.querySelectorAll('th, td'))
@@ -2029,6 +2005,20 @@ private fun buildPatenteChileExtractionScript(plateNumber: String): String {
                 const match = line.match(/^([^:]{2,60}):\s*(.+)$/);
                 if (match) {
                     pairs.push([normalize(match[1]), normalize(match[2])]);
+                }
+            });
+
+            document.querySelectorAll('li, p, div, span, strong, b, h1, h2, h3, h4').forEach((node) => {
+                const text = normalize(node.innerText || node.textContent || '');
+                if (!text || text.length > 180) {
+                    return;
+                }
+                const nextText = normalize(node.nextElementSibling?.innerText || node.nextElementSibling?.textContent || '');
+                if (!nextText || nextText.length > 180) {
+                    return;
+                }
+                if (/propiet|dueñ|duen|titular|rut|marca|modelo|año|ano|color|patente|ppu/i.test(text)) {
+                    pairs.push([text, nextText]);
                 }
             });
 
@@ -2086,6 +2076,10 @@ private fun buildPatenteChileExtractionScript(plateNumber: String): String {
                 vehicleModel: normalize(vehicleModel),
                 vehicleYear: normalize(vehicleYear),
                 vehicleColor: normalize(vehicleColor),
+                rawText: rawText.slice(0, 50000),
+                rawHtml: rawHtml.slice(0, 75000),
+                scriptPayloads,
+                labeledPairs: pairs,
             });
         })();
     """.trimIndent()
@@ -2096,7 +2090,7 @@ private fun attemptPatenteChileLookupExtraction(
     plateNumber: String,
     onLookupResolved: (PatenteChileLookup) -> Unit,
     onFinished: () -> Unit,
-    remainingAttempts: Int = 8,
+    remainingAttempts: Int = 14,
 ) {
     webView.evaluateJavascript(buildPatenteChileExtractionScript(plateNumber)) { rawResult ->
         val lookup = parsePatenteChileLookupResult(rawResult)
@@ -2117,35 +2111,12 @@ private fun attemptPatenteChileLookupExtraction(
                         remainingAttempts = remainingAttempts - 1,
                     )
                 },
-                750,
+                1000,
             )
         } else {
             onFinished()
         }
     }
-}
-
-private fun parsePatenteChileLookupResult(rawResult: String?): PatenteChileLookup? {
-    if (rawResult.isNullOrBlank() || rawResult == "null") {
-        return null
-    }
-
-    val decodedResult = runCatching {
-        JSONArray("[$rawResult]").getString(0)
-    }.getOrNull() ?: return null
-
-    val jsonObject = runCatching { JSONObject(decodedResult) }.getOrNull() ?: return null
-    val lookup = PatenteChileLookup(
-        plateNumber = jsonObject.optString("plateNumber").trim().ifBlank { return null },
-        ownerName = jsonObject.optString("ownerName").trim().ifBlank { null },
-        ownerRut = jsonObject.optString("ownerRut").trim().ifBlank { null },
-        vehicleMake = jsonObject.optString("vehicleMake").trim().ifBlank { null },
-        vehicleModel = jsonObject.optString("vehicleModel").trim().ifBlank { null },
-        vehicleYear = jsonObject.optString("vehicleYear").trim().ifBlank { null },
-        vehicleColor = jsonObject.optString("vehicleColor").trim().ifBlank { null },
-    )
-
-    return lookup.takeIf { it.hasMeaningfulData() }
 }
 
 private fun openBrowserUrl(context: Context, url: String) {
