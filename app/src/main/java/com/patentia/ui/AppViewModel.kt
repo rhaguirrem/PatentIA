@@ -86,6 +86,7 @@ data class AppUiState(
     val intervalSeconds: Int = 5,
     val intervalRunning: Boolean = false,
     val statusMessage: String = "Ready for capture",
+    val hasPendingManualImage: Boolean = false,
     val lastRecognizedPlates: List<String> = emptyList(),
     val theoreticalRadiusMeters: Double = 0.0,
     val syncDiagnostics: SyncDiagnostics = SyncDiagnostics(),
@@ -106,6 +107,7 @@ private data class RuntimeInputs(
     val intervalSeconds: Int,
     val intervalRunning: Boolean,
     val statusMessage: String,
+    val hasPendingManualImage: Boolean,
 )
 
 class AppViewModel(
@@ -125,6 +127,8 @@ class AppViewModel(
     private val intervalSeconds = MutableStateFlow(5)
     private val intervalRunning = MutableStateFlow(false)
     private val statusMessage = MutableStateFlow("Ready for capture")
+    private val pendingManualImageUri = MutableStateFlow<String?>(null)
+    private val pendingManualSource = MutableStateFlow<String?>(null)
     private val lastRecognizedPlates = MutableStateFlow<List<String>>(emptyList())
     private val currentLocation = MutableStateFlow<GeoPoint?>(null)
     private val locationStatus = MutableStateFlow(LocationStatus.CHECKING)
@@ -156,19 +160,27 @@ class AppViewModel(
         )
     }
 
+    private val captureStatus = combine(
+        statusMessage,
+        pendingManualImageUri,
+    ) { status, manualImageUri ->
+        status to (manualImageUri != null)
+    }
+
     private val runtimeInputs = combine(
         selectedPlate,
         captureMode,
         intervalSeconds,
         intervalRunning,
-        statusMessage,
-    ) { selected, mode, interval, running, status ->
+        captureStatus,
+    ) { selected, mode, interval, running, captureStatus ->
         RuntimeInputs(
             selectedPlate = selected,
             captureMode = mode,
             intervalSeconds = interval,
             intervalRunning = running,
-            statusMessage = status,
+            statusMessage = captureStatus.first,
+            hasPendingManualImage = captureStatus.second,
         )
     }
 
@@ -235,6 +247,7 @@ class AppViewModel(
             intervalSeconds = interval,
             intervalRunning = running,
             statusMessage = status,
+            hasPendingManualImage = runtime.hasPendingManualImage,
             lastRecognizedPlates = recognized,
             theoreticalRadiusMeters = theoreticalRadius,
             syncDiagnostics = syncDiagnostics,
@@ -307,6 +320,39 @@ class AppViewModel(
         }
     }
 
+    fun saveManualPlate(plateNumber: String) {
+        viewModelScope.launch {
+            val normalizedPlate = plateNumber
+                .uppercase()
+                .filter(Char::isLetterOrDigit)
+
+            if (normalizedPlate.length !in 5..10) {
+                statusMessage.value = "Enter a valid plate with 5 to 10 letters or numbers"
+                return@launch
+            }
+
+            lastRecognizedPlates.value = listOf(normalizedPlate)
+            val imageUri = pendingManualImageUri.value
+            val source = pendingManualSource.value?.let { "${it}_manual" } ?: "manual_entry"
+
+            saveSightings(
+                recognizedPlates = listOf(normalizedPlate),
+                rawText = normalizedPlate,
+                imageUri = imageUri,
+                source = source,
+            )
+            clearPendingManualImage(deleteImage = false)
+        }
+    }
+
+    fun discardPendingManualCapture() {
+        val hadPendingImage = pendingManualImageUri.value != null
+        clearPendingManualImage(deleteImage = true)
+        if (hadPendingImage) {
+            statusMessage.value = "Unsaved photo discarded"
+        }
+    }
+
     fun processImage(imageUri: Uri, source: String) {
         viewModelScope.launch {
             statusMessage.value = "Recognizing licence plate"
@@ -319,48 +365,82 @@ class AppViewModel(
             val recognition = runCatching {
                 plateRecognizer.recognize(appContext, persistedImageUri)
             }.getOrElse {
-                statusMessage.value = it.message ?: "Plate recognition failed"
+                lastRecognizedPlates.value = emptyList()
+                replacePendingManualImage(persistedImageUri.toString(), source)
+                statusMessage.value = (it.message ?: "Plate recognition failed") + ". Tap Write plate to save it manually"
                 return@launch
             }
             lastRecognizedPlates.value = recognition.plates
 
             if (recognition.plates.isEmpty()) {
-                imageStore.delete(persistedImageUri)
-                statusMessage.value = "No plate pattern recognized"
+                replacePendingManualImage(persistedImageUri.toString(), source)
+                statusMessage.value = "No plate pattern recognized. Tap Write plate to save it manually"
                 return@launch
             }
 
-            val primaryPlate = recognition.plates.first()
-
-            statusMessage.value = "Getting GPS position"
-            val location = currentLocationProvider.getCurrentLocation()
-            val savedPlates = repository.saveSightings(
-                recognizedPlates = listOf(primaryPlate),
+            clearPendingManualImage(deleteImage = true)
+            saveSightings(
+                recognizedPlates = recognition.plates,
                 rawText = recognition.rawText,
                 imageUri = persistedImageUri.toString(),
-                latitude = location?.latitude,
-                longitude = location?.longitude,
-                capturedAtEpochMillis = System.currentTimeMillis(),
                 source = source,
             )
-            repository.syncPendingSightings()
+        }
+    }
 
-            selectedPlate.value = savedPlates.firstOrNull()
-            val syncDiagnostics = repository.observeSyncDiagnostics().value
-            statusMessage.value = buildString {
-                append("Saved ")
-                append(savedPlates.joinToString())
-                if (location == null) {
-                    append(" without GPS fix")
-                }
-                when {
-                    !syncDiagnostics.isConfigured -> append(" locally only")
-                    syncDiagnostics.lastError != null -> append(" with cloud sync pending")
-                    syncDiagnostics.lastWarning != null -> append(" with shared metadata only")
-                    else -> append(" to group ${syncDiagnostics.activeGroupId ?: BuildConfig.DEFAULT_FIRESTORE_GROUP_ID}")
-                }
+    private suspend fun saveSightings(
+        recognizedPlates: List<String>,
+        rawText: String,
+        imageUri: String?,
+        source: String,
+    ): List<String> {
+        statusMessage.value = "Getting GPS position"
+        val location = currentLocationProvider.getCurrentLocation()
+        val savedPlates = repository.saveSightings(
+            recognizedPlates = recognizedPlates,
+            rawText = rawText,
+            imageUri = imageUri,
+            latitude = location?.latitude,
+            longitude = location?.longitude,
+            capturedAtEpochMillis = System.currentTimeMillis(),
+            source = source,
+        )
+        repository.syncPendingSightings()
+
+        selectedPlate.value = savedPlates.firstOrNull()
+        val syncDiagnostics = repository.observeSyncDiagnostics().value
+        statusMessage.value = buildString {
+            append("Saved ")
+            append(savedPlates.joinToString())
+            if (location == null) {
+                append(" without GPS fix")
+            }
+            when {
+                !syncDiagnostics.isConfigured -> append(" locally only")
+                syncDiagnostics.lastError != null -> append(" with cloud sync pending")
+                syncDiagnostics.lastWarning != null -> append(" with shared metadata only")
+                else -> append(" to group ${syncDiagnostics.activeGroupId ?: BuildConfig.DEFAULT_FIRESTORE_GROUP_ID}")
             }
         }
+        return savedPlates
+    }
+
+    private fun replacePendingManualImage(imageUri: String, source: String) {
+        val previousImageUri = pendingManualImageUri.value
+        if (previousImageUri != null && previousImageUri != imageUri) {
+            imageStore.delete(Uri.parse(previousImageUri))
+        }
+        pendingManualImageUri.value = imageUri
+        pendingManualSource.value = source
+    }
+
+    private fun clearPendingManualImage(deleteImage: Boolean) {
+        val imageUri = pendingManualImageUri.value
+        if (deleteImage && imageUri != null) {
+            imageStore.delete(Uri.parse(imageUri))
+        }
+        pendingManualImageUri.value = null
+        pendingManualSource.value = null
     }
 
     fun buildSelectedPlateSharePayload(): String? {
@@ -386,6 +466,24 @@ class AppViewModel(
             statusMessage.value = "Retrying cloud sync"
             repository.retrySighting(clientGeneratedId)
             statusMessage.value = "Retry finished"
+        }
+    }
+
+    fun updateSightingPlate(clientGeneratedId: String, currentPlateNumber: String?, correctedPlateNumber: String) {
+        viewModelScope.launch {
+            statusMessage.value = "Updating plate"
+            val errorMessage = repository.updateSightingPlate(clientGeneratedId, correctedPlateNumber)
+            if (errorMessage != null) {
+                statusMessage.value = errorMessage
+                return@launch
+            }
+
+            val normalizedPlate = correctedPlateNumber.uppercase().filter(Char::isLetterOrDigit)
+            lastRecognizedPlates.value = listOf(normalizedPlate)
+            if (uiState.value.selectedPlate == currentPlateNumber) {
+                selectedPlate.value = normalizedPlate
+            }
+            statusMessage.value = "Plate updated to $normalizedPlate"
         }
     }
 

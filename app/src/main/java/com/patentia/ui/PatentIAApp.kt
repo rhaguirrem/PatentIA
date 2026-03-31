@@ -19,6 +19,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,6 +53,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -84,6 +86,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -102,7 +106,7 @@ import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.MapUiSettings
-import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.MarkerInfoWindowContent
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
@@ -119,6 +123,7 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlinx.coroutines.delay
+import kotlin.math.abs
 
 private enum class AppPanel(val label: String) {
     Camera("Camera"),
@@ -237,6 +242,8 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 onCaptureModeChange = viewModel::setCaptureMode,
                                 onIntervalSecondsChange = viewModel::setIntervalSeconds,
                                 onToggleInterval = viewModel::toggleIntervalCapture,
+                                onSaveManualPlate = viewModel::saveManualPlate,
+                                onDiscardPendingManualCapture = viewModel::discardPendingManualCapture,
                                 onImageCaptured = viewModel::processImage,
                             )
 
@@ -249,6 +256,10 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 onRepeatedOnlyChange = viewModel::setRepeatedOnly,
                                 onTimeFilterChange = viewModel::setTimeFilter,
                                 onSelectPlate = viewModel::selectPlate,
+                                onOpenHistoryForPlate = { plateNumber ->
+                                    viewModel.selectPlate(plateNumber)
+                                    selectedPanel = AppPanel.History
+                                },
                             )
 
                             AppPanel.Cloudsync -> CloudSyncPanel(
@@ -275,6 +286,7 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                         shareText(context, payload)
                                     }
                                 },
+                                onEditSightingPlate = viewModel::updateSightingPlate,
                                 onRetrySighting = viewModel::retrySighting,
                                 onDeleteSighting = viewModel::deleteSighting,
                                 onDeleteLocalImage = viewModel::removeLocalImage,
@@ -349,8 +361,11 @@ private fun CameraPanel(
     onCaptureModeChange: (CaptureMode) -> Unit,
     onIntervalSecondsChange: (Int) -> Unit,
     onToggleInterval: () -> Unit,
+    onSaveManualPlate: (String) -> Unit,
+    onDiscardPendingManualCapture: () -> Unit,
     onImageCaptured: (Uri, String) -> Unit,
 ) {
+    var manualPlateDialogVisible by rememberSaveable { mutableStateOf(false) }
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
         onResult = { uri ->
@@ -371,11 +386,31 @@ private fun CameraPanel(
             onIntervalSecondsChange = onIntervalSecondsChange,
             onToggleInterval = onToggleInterval,
             onPickImage = { imagePickerLauncher.launch("image/*") },
+            onManualPlateEntry = { manualPlateDialogVisible = true },
+            onDiscardPendingManualCapture = onDiscardPendingManualCapture,
         )
         CameraCaptureCard(
             modifier = Modifier.weight(1f, fill = true),
             uiState = uiState,
             onImageCaptured = onImageCaptured,
+        )
+    }
+
+    if (manualPlateDialogVisible) {
+        ManualPlateEntryDialog(
+            hasPendingManualImage = uiState.hasPendingManualImage,
+            initialPlate = "",
+            title = "Write plate",
+            saveLabel = "Save",
+            onDismiss = { manualPlateDialogVisible = false },
+            onSave = { plateNumber ->
+                onSaveManualPlate(plateNumber)
+                manualPlateDialogVisible = false
+            },
+            onDiscardPendingImage = {
+                onDiscardPendingManualCapture()
+                manualPlateDialogVisible = false
+            },
         )
     }
 }
@@ -764,6 +799,8 @@ private fun CaptureControls(
     onIntervalSecondsChange: (Int) -> Unit,
     onToggleInterval: () -> Unit,
     onPickImage: () -> Unit,
+    onManualPlateEntry: () -> Unit,
+    onDiscardPendingManualCapture: () -> Unit,
 ) {
     Card(shape = RoundedCornerShape(24.dp)) {
         Column(
@@ -788,8 +825,34 @@ private fun CaptureControls(
                     colors = patentIAFilterChipColors(),
                 )
                 Spacer(Modifier.weight(1f))
+                OutlinedButton(onClick = onManualPlateEntry) {
+                    Text(if (uiState.hasPendingManualImage) "Write plate from photo" else "Write plate")
+                }
                 OutlinedButton(onClick = onPickImage) {
                     Icon(Icons.Default.PhotoLibrary, contentDescription = "Open image")
+                }
+            }
+            if (uiState.hasPendingManualImage) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                    shape = RoundedCornerShape(18.dp),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "A photo is waiting for manual plate entry.",
+                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                        TextButton(onClick = onDiscardPendingManualCapture) {
+                            Text("Discard")
+                        }
+                    }
                 }
             }
             if (uiState.captureMode == CaptureMode.INTERVAL) {
@@ -802,6 +865,68 @@ private fun CaptureControls(
                     )
                     OutlinedButton(onClick = onToggleInterval) {
                         Text(if (uiState.intervalRunning) "Stop interval" else "Start interval")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ManualPlateEntryDialog(
+    hasPendingManualImage: Boolean,
+    initialPlate: String,
+    title: String,
+    saveLabel: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+    onDiscardPendingImage: () -> Unit,
+) {
+    var plateNumber by rememberSaveable(initialPlate) { mutableStateOf(initialPlate) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(28.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                Text(
+                    text = if (hasPendingManualImage) {
+                        "The saved photo will be attached to this manual plate entry."
+                    } else {
+                        "Use manual input when OCR misses a plate or when you need to correct a saved one."
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = plateNumber,
+                    onValueChange = { plateNumber = it.uppercase() },
+                    label = { Text("Plate") },
+                    placeholder = { Text("ABCD12") },
+                    singleLine = true,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                ) {
+                    if (hasPendingManualImage) {
+                        TextButton(onClick = onDiscardPendingImage) {
+                            Text("Discard photo")
+                        }
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Close")
+                    }
+                    OutlinedButton(
+                        onClick = { onSave(plateNumber) },
+                        enabled = plateNumber.isNotBlank(),
+                    ) {
+                        Text(saveLabel)
                     }
                 }
             }
@@ -963,6 +1088,7 @@ private fun MapScreen(
     onRepeatedOnlyChange: (Boolean) -> Unit,
     onTimeFilterChange: (TimeFilter) -> Unit,
     onSelectPlate: (String?) -> Unit,
+    onOpenHistoryForPlate: (String) -> Unit,
 ) {
     val mappedSightings = uiState.filteredSightings.filter { it.latitude != null && it.longitude != null }
     val selectedPath = uiState.selectedPlateHistory.filter { it.latitude != null && it.longitude != null }
@@ -1037,7 +1163,7 @@ private fun MapScreen(
                     mappedSightings.forEach { sighting ->
                         val latitude = sighting.latitude ?: return@forEach
                         val longitude = sighting.longitude ?: return@forEach
-                        Marker(
+                        MarkerInfoWindowContent(
                             state = MarkerState(position = LatLng(latitude, longitude)),
                             title = sighting.plateNumber,
                             snippet = formatTimestamp(sighting.capturedAtEpochMillis),
@@ -1045,7 +1171,12 @@ private fun MapScreen(
                                 onSelectPlate(sighting.plateNumber)
                                 false
                             },
-                        )
+                            onInfoWindowClick = {
+                                onOpenHistoryForPlate(sighting.plateNumber)
+                            },
+                        ) {
+                            MapMarkerInfoWindowContent(sighting = sighting)
+                        }
                     }
 
                     if (selectedPath.size >= 2) {
@@ -1214,6 +1345,56 @@ private fun MapScreen(
 }
 
 @Composable
+private fun MapMarkerInfoWindowContent(
+    sighting: PlateSighting,
+) {
+    val context = LocalContext.current
+    val imageAvailable = remember(context, sighting.imageUri) {
+        isImageDisplayable(context, sighting.imageUri)
+    }
+
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+    ) {
+        Column(
+            modifier = Modifier.width(180.dp),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
+        ) {
+            if (imageAvailable) {
+                AsyncImage(
+                    model = sighting.imageUri,
+                    contentDescription = sighting.plateNumber,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 92.dp),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+            Column(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = sighting.plateNumber,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFF10202B),
+                )
+                Text(
+                    text = formatTimestamp(sighting.capturedAtEpochMillis),
+                    color = Color(0xFF4A6071),
+                )
+                Text(
+                    text = "Tap to open history details",
+                    color = Color(0xFF4A6071),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun HistoryScreen(
     modifier: Modifier = Modifier,
     uiState: AppUiState,
@@ -1222,12 +1403,16 @@ private fun HistoryScreen(
     onTimeFilterChange: (TimeFilter) -> Unit,
     onSelectPlate: (String?) -> Unit,
     onShareSelected: () -> Unit,
+    onEditSightingPlate: (String, String?, String) -> Unit,
     onRetrySighting: (String) -> Unit,
     onDeleteSighting: (String, String?) -> Unit,
     onDeleteLocalImage: (String, String?) -> Unit,
 ) {
     var fullScreenImageUri by rememberSaveable { mutableStateOf<String?>(null) }
     var patenteChileLookupPlate by rememberSaveable { mutableStateOf<String?>(null) }
+    var editingSighting by remember { mutableStateOf<PlateSighting?>(null) }
+    var pendingDeleteSighting by remember { mutableStateOf<PlateSighting?>(null) }
+    var pendingDeleteImage by remember { mutableStateOf<PlateSighting?>(null) }
     var patenteChileLookupCache by remember { mutableStateOf<Map<String, PatenteChileLookup>>(emptyMap()) }
     val selectedPlateLookup = uiState.selectedPlate?.let { patenteChileLookupCache[it] }
 
@@ -1291,6 +1476,12 @@ private fun HistoryScreen(
                         label = { Text("Share") },
                         leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
                     )
+                    AssistChip(
+                        onClick = {
+                            editingSighting = uiState.selectedPlateHistory.lastOrNull()
+                        },
+                        label = { Text("Edit plate") },
+                    )
                     IconButton(onClick = { onSelectPlate(null) }) {
                         Icon(Icons.Default.Close, contentDescription = "Close plate details")
                     }
@@ -1316,19 +1507,16 @@ private fun HistoryScreen(
                         onSelectPlate(sighting.plateNumber)
                         patenteChileLookupPlate = sighting.plateNumber
                     },
+                    onEditPlate = {
+                        editingSighting = sighting
+                    },
                     onRetry = { onRetrySighting(sighting.clientGeneratedId) },
                     onOpenImage = { imageUri -> fullScreenImageUri = imageUri },
                     onDeleteSighting = {
-                        onDeleteSighting(sighting.clientGeneratedId, sighting.imageUri)
-                        if (fullScreenImageUri == sighting.imageUri) {
-                            fullScreenImageUri = null
-                        }
+                        pendingDeleteSighting = sighting
                     },
                     onDeleteImage = {
-                        onDeleteLocalImage(sighting.clientGeneratedId, sighting.imageUri)
-                        if (fullScreenImageUri == sighting.imageUri) {
-                            fullScreenImageUri = null
-                        }
+                        pendingDeleteImage = sighting
                     },
                 )
             }
@@ -1351,6 +1539,78 @@ private fun HistoryScreen(
             },
         )
     }
+
+    editingSighting?.let { sighting ->
+        ManualPlateEntryDialog(
+            hasPendingManualImage = false,
+            initialPlate = sighting.plateNumber,
+            title = "Correct plate",
+            saveLabel = "Update",
+            onDismiss = { editingSighting = null },
+            onSave = { plateNumber ->
+                onEditSightingPlate(sighting.clientGeneratedId, sighting.plateNumber, plateNumber)
+                editingSighting = null
+            },
+            onDiscardPendingImage = { editingSighting = null },
+        )
+    }
+
+    pendingDeleteImage?.let { sighting ->
+        DestructiveConfirmationDialog(
+            title = "Delete local image?",
+            message = "This will remove the stored photo for ${sighting.plateNumber} from this device. The sighting record will stay in history.",
+            confirmLabel = "Delete image",
+            onDismiss = { pendingDeleteImage = null },
+            onConfirm = {
+                onDeleteLocalImage(sighting.clientGeneratedId, sighting.imageUri)
+                if (fullScreenImageUri == sighting.imageUri) {
+                    fullScreenImageUri = null
+                }
+                pendingDeleteImage = null
+            },
+        )
+    }
+
+    pendingDeleteSighting?.let { sighting ->
+        DestructiveConfirmationDialog(
+            title = "Delete history entry?",
+            message = "This will remove ${sighting.plateNumber} from history and also delete its local image if one is stored on this device.",
+            confirmLabel = "Delete entry",
+            onDismiss = { pendingDeleteSighting = null },
+            onConfirm = {
+                onDeleteSighting(sighting.clientGeneratedId, sighting.imageUri)
+                if (fullScreenImageUri == sighting.imageUri) {
+                    fullScreenImageUri = null
+                }
+                pendingDeleteSighting = null
+            },
+        )
+    }
+}
+
+@Composable
+private fun DestructiveConfirmationDialog(
+    title: String,
+    message: String,
+    confirmLabel: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, fontWeight = FontWeight.Bold) },
+        text = { Text(message) },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(confirmLabel)
+            }
+        },
+    )
 }
 
 @Composable
@@ -1409,6 +1669,7 @@ private fun HistoryRow(
     isSelected: Boolean,
     onClick: () -> Unit,
     onOpenPatenteChile: () -> Unit,
+    onEditPlate: () -> Unit,
     onRetry: () -> Unit,
     onOpenImage: (String) -> Unit,
     onDeleteSighting: () -> Unit,
@@ -1498,6 +1759,10 @@ private fun HistoryRow(
                             onClick = onOpenPatenteChile,
                             label = { Text("PatenteChile") },
                         )
+                        AssistChip(
+                            onClick = onEditPlate,
+                            label = { Text("Edit plate") },
+                        )
                         if (isSelected) {
                             AssistChip(
                                 onClick = onClick,
@@ -1540,20 +1805,53 @@ private fun FullScreenImageDialog(
     imageUri: String,
     onDismiss: () -> Unit,
 ) {
+    var scale by rememberSaveable { mutableStateOf(1f) }
+    var offsetX by rememberSaveable { mutableStateOf(0f) }
+    var offsetY by rememberSaveable { mutableStateOf(0f) }
+
     Dialog(onDismissRequest = onDismiss) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                .clickable(onClick = onDismiss)
                 .navigationBarsPadding(),
         ) {
             AsyncImage(
                 model = imageUri,
                 contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(imageUri) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            val nextScale = (scale * zoom).coerceIn(1f, 5f)
+                            if (abs(nextScale - 1f) < 0.01f) {
+                                scale = 1f
+                                offsetX = 0f
+                                offsetY = 0f
+                            } else {
+                                scale = nextScale
+                                offsetX += pan.x
+                                offsetY += pan.y
+                            }
+                        }
+                    }
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offsetX
+                        translationY = offsetY
+                    },
                 contentScale = ContentScale.Fit,
             )
+            if (scale > 1f) {
+                Text(
+                    text = "Pinch to zoom, drag to move",
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(12.dp),
+                    color = Color.White,
+                )
+            }
             TextButton(
                 modifier = Modifier
                     .align(Alignment.TopEnd)

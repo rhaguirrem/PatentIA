@@ -173,6 +173,35 @@ class SightingRepository(
         syncPendingSightings(clientGeneratedIds = listOf(clientGeneratedId))
     }
 
+    suspend fun updateSightingPlate(clientGeneratedId: String, plateNumber: String): String? {
+        val normalizedPlate = plateNumber.trim().uppercase()
+        if (normalizedPlate.length !in 5..10) {
+            return "Enter a valid plate with 5 to 10 letters or numbers"
+        }
+
+        val sighting = dao.getByClientGeneratedIds(listOf(clientGeneratedId)).firstOrNull()
+            ?: return "History entry no longer exists"
+
+        val syncState = if (remoteSyncDataSource.isConfigured) {
+            PlateSyncState.PENDING_UPLOAD.name
+        } else {
+            PlateSyncState.LOCAL_ONLY.name
+        }
+
+        dao.updatePlateNumber(
+            clientGeneratedId = clientGeneratedId,
+            plateNumber = normalizedPlate,
+            syncState = syncState,
+            updatedAtEpochMillis = System.currentTimeMillis(),
+        )
+
+        refreshDiagnostics(lastError = null, lastWarning = null)
+        if (remoteSyncDataSource.isConfigured && sighting.groupId != null) {
+            syncPendingSightings(clientGeneratedIds = listOf(clientGeneratedId))
+        }
+        return null
+    }
+
     suspend fun switchActiveGroup(groupId: String) {
         if (!remoteSyncDataSource.isConfigured) {
             refreshDiagnostics(lastError = null, lastWarning = null)

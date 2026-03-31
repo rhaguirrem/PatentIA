@@ -92,6 +92,23 @@ interface PlateSightingDao {
         updatedAtEpochMillis: Long,
     )
 
+    @Query(
+        """
+        UPDATE plate_sightings
+        SET plateNumber = :plateNumber,
+            syncState = :syncState,
+            syncError = NULL,
+            updatedAtEpochMillis = :updatedAtEpochMillis
+        WHERE clientGeneratedId = :clientGeneratedId
+        """
+    )
+    suspend fun updatePlateNumber(
+        clientGeneratedId: String,
+        plateNumber: String,
+        syncState: String,
+        updatedAtEpochMillis: Long,
+    )
+
     @Query("DELETE FROM plate_sightings WHERE clientGeneratedId = :clientGeneratedId")
     suspend fun deleteByClientGeneratedId(clientGeneratedId: String)
 }
