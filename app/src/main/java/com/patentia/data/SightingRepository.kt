@@ -227,8 +227,7 @@ class SightingRepository(
 
     suspend fun removeLocalImage(clientGeneratedId: String, imageUri: String?) {
         val sighting = dao.getByClientGeneratedIds(listOf(clientGeneratedId)).firstOrNull()
-
-        deleteLocalImageFile(imageUri)
+        val storedImageUri = sighting?.imageUri ?: imageUri
 
         val shouldDeleteLocalRecord = sighting != null && sighting.remoteId == null && sighting.syncState != PlateSyncState.SYNCED.name
         if (shouldDeleteLocalRecord) {
@@ -240,14 +239,15 @@ class SightingRepository(
             )
         }
 
+        deleteLocalImageFileIfUnreferenced(storedImageUri)
+
         refreshDiagnostics()
     }
 
     suspend fun deleteSighting(clientGeneratedId: String, imageUri: String?): String? {
         val sighting = dao.getByClientGeneratedIds(listOf(clientGeneratedId)).firstOrNull()
             ?: return "History entry no longer exists"
-
-        deleteLocalImageFile(imageUri)
+        val storedImageUri = sighting.imageUri ?: imageUri
 
         val remoteDeleteError = if (!sighting.remoteId.isNullOrBlank()) {
             if (!activeSession.isAvailable) {
@@ -264,8 +264,17 @@ class SightingRepository(
         }
 
         dao.deleteByClientGeneratedId(clientGeneratedId)
+        deleteLocalImageFileIfUnreferenced(storedImageUri)
         refreshDiagnostics(lastError = null)
         return null
+    }
+
+    private suspend fun deleteLocalImageFileIfUnreferenced(imageUri: String?) {
+        val normalizedImageUri = imageUri?.takeIf { it.isNotBlank() } ?: return
+        if (dao.countByImageUri(normalizedImageUri) > 0) {
+            return
+        }
+        deleteLocalImageFile(normalizedImageUri)
     }
 
     private fun deleteLocalImageFile(imageUri: String?) {

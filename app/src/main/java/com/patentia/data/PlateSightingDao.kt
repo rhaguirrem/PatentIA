@@ -24,6 +24,9 @@ interface PlateSightingDao {
     @Query("SELECT COUNT(*) FROM plate_sightings WHERE syncState IN (:syncStates)")
     suspend fun countBySyncStates(syncStates: List<String>): Int
 
+    @Query("SELECT COUNT(*) FROM plate_sightings WHERE imageUri = :imageUri")
+    suspend fun countByImageUri(imageUri: String): Int
+
     @Query(
         """
         UPDATE plate_sightings
