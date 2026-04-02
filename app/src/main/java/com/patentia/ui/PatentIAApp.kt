@@ -21,15 +21,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -46,11 +47,14 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.AlertDialog
@@ -74,6 +78,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -84,6 +89,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -94,11 +100,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
+
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
@@ -106,7 +114,7 @@ import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.MapUiSettings
-import com.google.maps.android.compose.MarkerInfoWindowContent
+import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
@@ -138,6 +146,7 @@ private enum class AppPanel(val label: String) {
 fun PatentIAApp(viewModel: AppViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     var selectedPanel by rememberSaveable { mutableStateOf(AppPanel.Camera) }
+    var pendingHistoryImageUri by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var permissionRefreshToken by remember { mutableStateOf(0) }
@@ -256,8 +265,9 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 onRepeatedOnlyChange = viewModel::setRepeatedOnly,
                                 onTimeFilterChange = viewModel::setTimeFilter,
                                 onSelectPlate = viewModel::selectPlate,
-                                onOpenHistoryForPlate = { plateNumber ->
-                                    viewModel.selectPlate(plateNumber)
+                                onOpenHistoryForPlate = { sighting ->
+                                    viewModel.selectPlate(sighting.plateNumber)
+                                    pendingHistoryImageUri = sighting.imageUri?.takeIf { it.isNotBlank() }
                                     selectedPanel = AppPanel.History
                                 },
                             )
@@ -290,6 +300,8 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 onRetrySighting = viewModel::retrySighting,
                                 onDeleteSighting = viewModel::deleteSighting,
                                 onDeleteLocalImage = viewModel::removeLocalImage,
+                                initialImageUri = pendingHistoryImageUri,
+                                onInitialImageConsumed = { pendingHistoryImageUri = null },
                             )
 
                             AppPanel.About -> AboutPanel(
@@ -308,6 +320,17 @@ fun PatentIAApp(viewModel: AppViewModel) {
                         }
                     }
                 }
+            }
+
+            uiState.pendingImageReview?.let { review ->
+                UploadedPhotoReviewDialog(
+                    review = review,
+                    currentLocation = uiState.currentLocation,
+                    isMapsConfigured = BuildConfig.IS_MAPS_API_KEY_CONFIGURED,
+                    onDismiss = viewModel::discardPendingImageReview,
+                    onLocationChange = viewModel::updatePendingImageReviewLocation,
+                    onSave = viewModel::savePendingImageReview,
+                )
             }
         }
     }
@@ -398,7 +421,7 @@ private fun CameraPanel(
 
     if (manualPlateDialogVisible) {
         ManualPlateEntryDialog(
-            hasPendingManualImage = uiState.hasPendingManualImage,
+            pendingManualImageUri = uiState.pendingManualImageUri,
             initialPlate = "",
             title = "Write plate",
             saveLabel = "Save",
@@ -407,7 +430,8 @@ private fun CameraPanel(
                 onSaveManualPlate(plateNumber)
                 manualPlateDialogVisible = false
             },
-            onDiscardPendingImage = {
+            imageActionLabel = "Discard photo",
+            onImageAction = {
                 onDiscardPendingManualCapture()
                 manualPlateDialogVisible = false
             },
@@ -791,7 +815,6 @@ private fun SyncStatusCard(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CaptureControls(
     uiState: AppUiState,
@@ -812,26 +835,40 @@ private fun CaptureControls(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FilterChip(
+                CaptureActionButton(
+                    modifier = Modifier.weight(1f),
                     selected = uiState.captureMode == CaptureMode.SINGLE,
                     onClick = { onCaptureModeChange(CaptureMode.SINGLE) },
-                    label = { Text("Single shot") },
-                    colors = patentIAFilterChipColors(),
+                    icon = Icons.Default.CameraAlt,
+                    contentDescription = "Single shot",
                 )
-                FilterChip(
+                CaptureActionButton(
+                    modifier = Modifier.weight(1f),
                     selected = uiState.captureMode == CaptureMode.INTERVAL,
                     onClick = { onCaptureModeChange(CaptureMode.INTERVAL) },
-                    label = { Text("Interval") },
-                    colors = patentIAFilterChipColors(),
+                    icon = Icons.Default.Timer,
+                    contentDescription = "Interval mode",
                 )
-                Spacer(Modifier.weight(1f))
-                OutlinedButton(onClick = onManualPlateEntry) {
-                    Text(if (uiState.hasPendingManualImage) "Write plate from photo" else "Write plate")
-                }
-                OutlinedButton(onClick = onPickImage) {
-                    Icon(Icons.Default.PhotoLibrary, contentDescription = "Open image")
-                }
+                CaptureActionButton(
+                    modifier = Modifier.weight(1f),
+                    selected = false,
+                    onClick = onManualPlateEntry,
+                    icon = Icons.Default.Edit,
+                    contentDescription = if (uiState.hasPendingManualImage) "Write plate from photo" else "Write plate",
+                )
+                CaptureActionButton(
+                    modifier = Modifier.weight(1f),
+                    selected = false,
+                    onClick = onPickImage,
+                    icon = Icons.Default.PhotoLibrary,
+                    contentDescription = "Upload image",
+                )
             }
+            Text(
+                text = "Uploaded photos now open a review step where you can pan the map under the center pin before saving.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
             if (uiState.hasPendingManualImage) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
@@ -873,65 +910,495 @@ private fun CaptureControls(
 }
 
 @Composable
+private fun CaptureActionButton(
+    modifier: Modifier = Modifier,
+    selected: Boolean,
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+) {
+    val containerColor = if (selected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val contentColor = if (selected) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+
+    OutlinedButton(
+        modifier = modifier,
+        onClick = onClick,
+        contentPadding = PaddingValues(vertical = 12.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(containerColor)
+                .padding(8.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = contentColor,
+            )
+        }
+    }
+}
+
+@Composable
 private fun ManualPlateEntryDialog(
-    hasPendingManualImage: Boolean,
+    pendingManualImageUri: String?,
     initialPlate: String,
     title: String,
     saveLabel: String,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit,
-    onDiscardPendingImage: () -> Unit,
+    imageActionLabel: String? = null,
+    onImageAction: (() -> Unit)? = null,
 ) {
     var plateNumber by rememberSaveable(initialPlate) { mutableStateOf(initialPlate) }
+    val hasPendingManualImage = !pendingManualImageUri.isNullOrBlank()
+    val context = LocalContext.current
+    val isPendingImageDisplayable = remember(context, pendingManualImageUri) {
+        isImageDisplayable(context, pendingManualImageUri)
+    }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
         Surface(
+            modifier = Modifier.fillMaxSize(),
             shape = RoundedCornerShape(28.dp),
             color = MaterialTheme.colorScheme.surface,
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding()
+                    .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                    TextButton(onClick = onDismiss) {
+                        Text("Close")
+                    }
+                }
                 Text(
                     text = if (hasPendingManualImage) {
-                        "The saved photo will be attached to this manual plate entry."
+                        "The captured photo stays visible while you add the plate. Pinch to zoom and drag to inspect details."
                     } else {
                         "Use manual input when OCR misses a plate or when you need to correct a saved one."
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
-                    modifier = Modifier.fillMaxWidth(),
-                    value = plateNumber,
-                    onValueChange = { plateNumber = it.uppercase() },
-                    label = { Text("Plate") },
-                    placeholder = { Text("ABCD12") },
-                    singleLine = true,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                ) {
-                    if (hasPendingManualImage) {
-                        TextButton(onClick = onDiscardPendingImage) {
-                            Text("Discard photo")
+                if (hasPendingManualImage) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = true),
+                        shape = RoundedCornerShape(24.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        ),
+                    ) {
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (isPendingImageDisplayable) {
+                                ZoomableAsyncImage(
+                                    imageUri = pendingManualImageUri,
+                                    contentDescription = "Pending manual plate photo",
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(12.dp),
+                                )
+                                Text(
+                                    text = "Pinch to zoom, drag to move",
+                                    modifier = Modifier
+                                        .align(Alignment.TopStart)
+                                        .padding(16.dp),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = "The pending photo is no longer available.",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                         }
                     }
-                    TextButton(onClick = onDismiss) {
-                        Text("Close")
-                    }
-                    OutlinedButton(
-                        onClick = { onSave(plateNumber) },
-                        enabled = plateNumber.isNotBlank(),
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    ),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Text(saveLabel)
+                        OutlinedTextField(
+                            modifier = Modifier.fillMaxWidth(),
+                            value = plateNumber,
+                            onValueChange = { plateNumber = it.uppercase() },
+                            label = { Text("Plate") },
+                            placeholder = { Text("ABCD12") },
+                            singleLine = true,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                        ) {
+                            if (hasPendingManualImage && imageActionLabel != null && onImageAction != null) {
+                                TextButton(onClick = onImageAction) {
+                                    Text(imageActionLabel)
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = { onSave(plateNumber) },
+                                enabled = plateNumber.isNotBlank(),
+                            ) {
+                                Text(saveLabel)
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun UploadedPhotoReviewDialog(
+    review: PendingImageReview,
+    currentLocation: GeoPoint?,
+    isMapsConfigured: Boolean,
+    onDismiss: () -> Unit,
+    onLocationChange: (GeoPoint) -> Unit,
+    onSave: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val isPendingImageDisplayable = remember(context, review.imageUri) {
+        isImageDisplayable(context, review.imageUri)
+    }
+    var plateInput by rememberSaveable(review.imageUri) {
+        mutableStateOf(review.recognizedPlates.joinToString(", "))
+    }
+    var mapPickerVisible by rememberSaveable(review.imageUri) { mutableStateOf(false) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(28.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Review uploaded photo", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text(
+                            "Pan and zoom the map until the center pin matches the photo location.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Discard")
+                    }
+                }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(0.42f, fill = true)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    if (isPendingImageDisplayable) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(168.dp),
+                            shape = RoundedCornerShape(24.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            ),
+                        ) {
+                            ZoomableAsyncImage(
+                                imageUri = review.imageUri,
+                                contentDescription = "Uploaded photo preview",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(12.dp),
+                            )
+                        }
+                    }
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(24.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        ),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = plateInput,
+                                onValueChange = { plateInput = it.uppercase() },
+                                label = { Text("Plate") },
+                                placeholder = { Text("ABCD12 or ABCD12, XY1234") },
+                            )
+                            if (review.recognizedPlates.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    review.recognizedPlates.forEach { suggestion ->
+                                        AssistChip(
+                                            onClick = { plateInput = suggestion },
+                                            label = { Text(suggestion) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                ) {
+                    OutlinedButton(
+                        onClick = { mapPickerVisible = true },
+                        enabled = plateInput.isNotBlank() && isMapsConfigured,
+                    ) {
+                        Icon(Icons.Default.LocationOn, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Set Location")
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancel")
+                    }
+                    OutlinedButton(
+                        onClick = { onSave(plateInput) },
+                        enabled = plateInput.isNotBlank(),
+                    ) {
+                        Text("Save photo")
+                    }
+                }
+
+                review.selectedLocation?.let { location ->
+                    Text(
+                        text = "Selected location: ${formatCoordinate(location.latitude)}, ${formatCoordinate(location.longitude)}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                if (!isMapsConfigured) {
+                    Text(
+                        text = "Map location picker is unavailable in this build because Google Maps is not configured.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+
+    if (mapPickerVisible && isMapsConfigured) {
+        LocationPickerDialog(
+            initialLocation = review.selectedLocation ?: currentLocation,
+            currentLocation = currentLocation,
+            onCancel = { mapPickerVisible = false },
+            onConfirm = { location ->
+                onLocationChange(location)
+                mapPickerVisible = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun LocationPickerDialog(
+    initialLocation: GeoPoint?,
+    currentLocation: GeoPoint?,
+    onCancel: () -> Unit,
+    onConfirm: (GeoPoint) -> Unit,
+) {
+    val fallbackLocation = initialLocation ?: currentLocation ?: GeoPoint(-33.4489, -70.6693)
+    val mapProperties = remember(currentLocation) {
+        MapProperties(isMyLocationEnabled = currentLocation != null)
+    }
+    val mapUiSettings = remember(currentLocation) {
+        MapUiSettings(
+            myLocationButtonEnabled = currentLocation != null,
+            zoomControlsEnabled = false,
+        )
+    }
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(
+            LatLng(fallbackLocation.latitude, fallbackLocation.longitude),
+            if (initialLocation != null) 17f else 15f,
+        )
+    }
+
+    LaunchedEffect(initialLocation?.latitude, initialLocation?.longitude, currentLocation?.latitude, currentLocation?.longitude) {
+        val target = initialLocation ?: currentLocation ?: fallbackLocation
+        cameraPositionState.move(
+            CameraUpdateFactory.newLatLngZoom(
+                LatLng(target.latitude, target.longitude),
+                if (initialLocation != null) 17f else 15f,
+            )
+        )
+    }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(28.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Set location", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text(
+                            "Pan and zoom the map until the center pin matches the location.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = onCancel) {
+                        Text("Close")
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = true)
+                        .clip(RoundedCornerShape(24.dp)),
+                ) {
+                    GoogleMap(
+                        modifier = Modifier.fillMaxSize(),
+                        cameraPositionState = cameraPositionState,
+                        properties = mapProperties,
+                        uiSettings = mapUiSettings,
+                    )
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = "Selected location",
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(42.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+
+                Text(
+                    text = "Selected coordinates: ${formatCoordinate(cameraPositionState.position.target.latitude)}, ${formatCoordinate(cameraPositionState.position.target.longitude)}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                ) {
+                    TextButton(onClick = onCancel) {
+                        Text("Cancel")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val target = cameraPositionState.position.target
+                            onConfirm(GeoPoint(latitude = target.latitude, longitude = target.longitude))
+                        },
+                    ) {
+                        Text("Confirm")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ZoomableAsyncImage(
+    imageUri: String,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+) {
+    var scale by rememberSaveable(imageUri) { mutableStateOf(1f) }
+    var offsetX by rememberSaveable(imageUri) { mutableStateOf(0f) }
+    var offsetY by rememberSaveable(imageUri) { mutableStateOf(0f) }
+
+    AsyncImage(
+        model = imageUri,
+        contentDescription = contentDescription,
+        modifier = modifier
+            .pointerInput(imageUri) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    val nextScale = (scale * zoom).coerceIn(1f, 5f)
+                    if (abs(nextScale - 1f) < 0.01f) {
+                        scale = 1f
+                        offsetX = 0f
+                        offsetY = 0f
+                    } else {
+                        scale = nextScale
+                        offsetX += pan.x
+                        offsetY += pan.y
+                    }
+                }
+            }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                translationX = offsetX
+                translationY = offsetY
+            },
+        contentScale = ContentScale.Fit,
+    )
 }
 
 @Composable
@@ -1088,11 +1555,12 @@ private fun MapScreen(
     onRepeatedOnlyChange: (Boolean) -> Unit,
     onTimeFilterChange: (TimeFilter) -> Unit,
     onSelectPlate: (String?) -> Unit,
-    onOpenHistoryForPlate: (String) -> Unit,
+    onOpenHistoryForPlate: (PlateSighting) -> Unit,
 ) {
     val mappedSightings = uiState.filteredSightings.filter { it.latitude != null && it.longitude != null }
     val selectedPath = uiState.selectedPlateHistory.filter { it.latitude != null && it.longitude != null }
     val currentLocation = uiState.currentLocation
+    var selectedMapPreview by remember { mutableStateOf<PlateSighting?>(null) }
     var controlsVisible by rememberSaveable { mutableStateOf(false) }
     var mapLoaded by rememberSaveable { mutableStateOf(false) }
     var showMapTroubleshooting by rememberSaveable { mutableStateOf(false) }
@@ -1124,6 +1592,9 @@ private fun MapScreen(
     }
 
     LaunchedEffect(mappedSightings.firstOrNull()?.id, uiState.selectedPlate, currentLocation) {
+        selectedMapPreview = selectedMapPreview?.let { preview ->
+            mappedSightings.firstOrNull { it.clientGeneratedId == preview.clientGeneratedId }
+        }
         val focus = selectedPath.lastOrNull() ?: mappedSightings.firstOrNull()
         if (focus != null) {
             cameraPositionState.move(
@@ -1155,6 +1626,9 @@ private fun MapScreen(
                     cameraPositionState = cameraPositionState,
                     properties = mapProperties,
                     uiSettings = mapUiSettings,
+                    onMapClick = {
+                        selectedMapPreview = null
+                    },
                     onMapLoaded = {
                         mapLoaded = true
                         showMapTroubleshooting = false
@@ -1163,20 +1637,16 @@ private fun MapScreen(
                     mappedSightings.forEach { sighting ->
                         val latitude = sighting.latitude ?: return@forEach
                         val longitude = sighting.longitude ?: return@forEach
-                        MarkerInfoWindowContent(
+                        Marker(
                             state = MarkerState(position = LatLng(latitude, longitude)),
                             title = sighting.plateNumber,
                             snippet = formatTimestamp(sighting.capturedAtEpochMillis),
                             onClick = {
                                 onSelectPlate(sighting.plateNumber)
-                                false
+                                selectedMapPreview = sighting
+                                true
                             },
-                            onInfoWindowClick = {
-                                onOpenHistoryForPlate(sighting.plateNumber)
-                            },
-                        ) {
-                            MapMarkerInfoWindowContent(sighting = sighting)
-                        }
+                        )
                     }
 
                     if (selectedPath.size >= 2) {
@@ -1241,6 +1711,24 @@ private fun MapScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+        }
+
+        selectedMapPreview?.let { sighting ->
+            if (!controlsVisible && !mappedSightings.isEmpty()) {
+                MapMarkerPreviewCard(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(12.dp),
+                    sighting = sighting,
+                    onOpenHistory = {
+                        selectedMapPreview = null
+                        onOpenHistoryForPlate(sighting)
+                    },
+                    onDismiss = {
+                        selectedMapPreview = null
+                    },
+                )
             }
         }
 
@@ -1345,8 +1833,11 @@ private fun MapScreen(
 }
 
 @Composable
-private fun MapMarkerInfoWindowContent(
+private fun MapMarkerPreviewCard(
+    modifier: Modifier = Modifier,
     sighting: PlateSighting,
+    onOpenHistory: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
     val imageAvailable = remember(context, sighting.imageUri) {
@@ -1354,45 +1845,61 @@ private fun MapMarkerInfoWindowContent(
     }
 
     Card(
+        modifier = modifier,
+        onClick = onOpenHistory,
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f)),
     ) {
-        Column(
-            modifier = Modifier.width(180.dp),
-            verticalArrangement = Arrangement.spacedBy(0.dp),
+        Box(
+            modifier = Modifier.width(220.dp),
         ) {
-            if (imageAvailable) {
-                AsyncImage(
-                    model = sighting.imageUri,
-                    contentDescription = sighting.plateNumber,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 92.dp),
-                    contentScale = ContentScale.Crop,
-                )
-            }
             Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
-                Text(
-                    text = sighting.plateNumber,
-                    fontWeight = FontWeight.Black,
-                    color = Color(0xFF10202B),
-                )
-                Text(
-                    text = formatTimestamp(sighting.capturedAtEpochMillis),
-                    color = Color(0xFF4A6071),
-                )
-                Text(
-                    text = "Tap to open history details",
-                    color = Color(0xFF4A6071),
-                    style = MaterialTheme.typography.labelMedium,
-                )
+                if (imageAvailable) {
+                    AsyncImage(
+                        model = sighting.imageUri,
+                        contentDescription = sighting.plateNumber,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(124.dp)
+                            .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = sighting.plateNumber,
+                        fontWeight = FontWeight.Black,
+                    )
+                    Text(
+                        text = formatTimestamp(sighting.capturedAtEpochMillis),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "Tap to open history details",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+
+            TextButton(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp),
+                onClick = onDismiss,
+            ) {
+                Text("Close")
             }
         }
     }
 }
+
+private fun formatCoordinate(value: Double): String = String.format("%.5f", value)
 
 @Composable
 private fun HistoryScreen(
@@ -1407,14 +1914,23 @@ private fun HistoryScreen(
     onRetrySighting: (String) -> Unit,
     onDeleteSighting: (String, String?) -> Unit,
     onDeleteLocalImage: (String, String?) -> Unit,
+    initialImageUri: String?,
+    onInitialImageConsumed: () -> Unit,
 ) {
-    var fullScreenImageUri by rememberSaveable { mutableStateOf<String?>(null) }
-    var patenteChileLookupPlate by rememberSaveable { mutableStateOf<String?>(null) }
+    var fullScreenImageUri by remember { mutableStateOf<String?>(null) }
+    var patenteChileLookupPlate by remember { mutableStateOf<String?>(null) }
     var editingSighting by remember { mutableStateOf<PlateSighting?>(null) }
     var pendingDeleteSighting by remember { mutableStateOf<PlateSighting?>(null) }
     var pendingDeleteImage by remember { mutableStateOf<PlateSighting?>(null) }
     var patenteChileLookupCache by remember { mutableStateOf<Map<String, PatenteChileLookup>>(emptyMap()) }
     val selectedPlateLookup = uiState.selectedPlate?.let { patenteChileLookupCache[it] }
+
+    LaunchedEffect(initialImageUri) {
+        if (!initialImageUri.isNullOrBlank()) {
+            fullScreenImageUri = initialImageUri
+            onInitialImageConsumed()
+        }
+    }
 
     Column(
         modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -1442,7 +1958,7 @@ private fun HistoryScreen(
                     AssistChip(
                         onClick = { },
                         label = {
-                            Text("${uiState.selectedPlate} • ${uiState.selectedPlateHistory.size} obs • ${uiState.theoreticalRadiusMeters.toInt()} m")
+                            Text("${uiState.selectedPlate} | ${uiState.selectedPlateHistory.size} obs | ${uiState.theoreticalRadiusMeters.toInt()} m")
                         },
                         colors = AssistChipDefaults.assistChipColors(
                             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.25f),
@@ -1542,7 +2058,7 @@ private fun HistoryScreen(
 
     editingSighting?.let { sighting ->
         ManualPlateEntryDialog(
-            hasPendingManualImage = false,
+            pendingManualImageUri = sighting.imageUri?.takeIf { it.isNotBlank() },
             initialPlate = sighting.plateNumber,
             title = "Correct plate",
             saveLabel = "Update",
@@ -1551,7 +2067,6 @@ private fun HistoryScreen(
                 onEditSightingPlate(sighting.clientGeneratedId, sighting.plateNumber, plateNumber)
                 editingSighting = null
             },
-            onDiscardPendingImage = { editingSighting = null },
         )
     }
 
@@ -1805,53 +2320,30 @@ private fun FullScreenImageDialog(
     imageUri: String,
     onDismiss: () -> Unit,
 ) {
-    var scale by rememberSaveable { mutableStateOf(1f) }
-    var offsetX by rememberSaveable { mutableStateOf(0f) }
-    var offsetY by rememberSaveable { mutableStateOf(0f) }
-
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
                 .navigationBarsPadding(),
         ) {
-            AsyncImage(
-                model = imageUri,
+            ZoomableAsyncImage(
+                imageUri = imageUri,
                 contentDescription = null,
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(imageUri) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            val nextScale = (scale * zoom).coerceIn(1f, 5f)
-                            if (abs(nextScale - 1f) < 0.01f) {
-                                scale = 1f
-                                offsetX = 0f
-                                offsetY = 0f
-                            } else {
-                                scale = nextScale
-                                offsetX += pan.x
-                                offsetY += pan.y
-                            }
-                        }
-                    }
-                    .graphicsLayer {
-                        scaleX = scale
-                        scaleY = scale
-                        translationX = offsetX
-                        translationY = offsetY
-                    },
-                contentScale = ContentScale.Fit,
+                    .padding(top = 56.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
             )
-            if (scale > 1f) {
-                Text(
-                    text = "Pinch to zoom, drag to move",
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(12.dp),
-                    color = Color.White,
-                )
-            }
+            Text(
+                text = "Pinch to zoom, drag to move",
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(12.dp),
+                color = Color.White,
+            )
             TextButton(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -2096,16 +2588,16 @@ private fun syncTitle(syncDiagnostics: SyncDiagnostics): String {
 private fun syncSubtitle(syncDiagnostics: SyncDiagnostics): String {
     return when {
         !syncDiagnostics.isConfigured -> "Add google-services.json to enable Firebase Auth and Firestore."
-        syncDiagnostics.lastError != null -> "${syncDiagnostics.lastError} • queued items stay local until retry succeeds."
+        syncDiagnostics.lastError != null -> "${syncDiagnostics.lastError} - queued items stay local until retry succeeds."
         syncDiagnostics.lastWarning != null -> "${syncDiagnostics.lastWarning} Firestore sharing still works, but remote devices will not see the photo until Storage is enabled."
         syncDiagnostics.pendingUploadCount > 0 -> "Queued sightings upload automatically when network and Firebase are available."
         syncDiagnostics.isSignedIn -> buildString {
             append("Signed in as ")
             append(syncDiagnostics.providerLabel)
-            append(" • group ")
+            append(" - group ")
             append(syncDiagnostics.activeGroupId ?: "-")
             syncDiagnostics.lastSyncAtEpochMillis?.let {
-                append(" • last sync ")
+                append(" - last sync ")
                 append(formatTimestamp(it))
             }
         }
@@ -2271,7 +2763,7 @@ private fun buildPatenteChileExtractionScript(plateNumber: String): String {
             const pairs = [];
             const scriptPayloads = Array.from(document.querySelectorAll('script'))
                 .map((script) => normalize(script.textContent || ''))
-                .filter((scriptText) => /propiet|dueñ|duen|titular|rut|marca|modelo|año|ano|color|patente|ppu/i.test(scriptText))
+                .filter((scriptText) => /propiet|duen|titular|rut|marca|modelo|ano|color|patente|ppu/i.test(scriptText))
                 .slice(0, 12)
                 .map((scriptText) => scriptText.slice(0, 4000));
 
@@ -2315,7 +2807,7 @@ private fun buildPatenteChileExtractionScript(plateNumber: String): String {
                 if (!nextText || nextText.length > 180) {
                     return;
                 }
-                if (/propiet|dueñ|duen|titular|rut|marca|modelo|año|ano|color|patente|ppu/i.test(text)) {
+                if (/propiet|duen|titular|rut|marca|modelo|ano|color|patente|ppu/i.test(text)) {
                     pairs.push([text, nextText]);
                 }
             });
@@ -2349,18 +2841,18 @@ private fun buildPatenteChileExtractionScript(plateNumber: String): String {
                 return '';
             };
 
-            const ownerName = findPair(['propietario', 'dueño', 'dueno', 'titular', 'nombre del propietario', 'nombre del titular']) ||
+            const ownerName = findPair(['propietario', 'dueno', 'titular', 'nombre del propietario', 'nombre del titular']) ||
                 findByPatterns([
-                    /(?:nombre(?: del)?(?: propietario| titular| dueño| dueno)?|propietario|dueño|dueno|titular)\s*:?\s*([^\n]+)/i,
+                    /(?:nombre(?: del)?(?: propietario| titular| dueno)?|propietario|dueno|titular)\s*:?\s*([^\n]+)/i,
                 ]);
-            const ownerRut = findPair(['rut propietario', 'rut dueño', 'rut dueno', 'rut titular', 'rut']) ||
+            const ownerRut = findPair(['rut propietario', 'rut dueno', 'rut titular', 'rut']) ||
                 findByPatterns([
-                    /(?:rut(?: del)?(?: propietario| dueño| dueno| titular)?)\s*:?\s*([^\n]+)/i,
+                    /(?:rut(?: del)?(?: propietario| dueno| titular)?)\s*:?\s*([^\n]+)/i,
                     /(\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b)/,
                 ]);
             const vehicleMake = findPair(['marca']) || findByPatterns([/(?:marca)\s*:?\s*([^\n]+)/i]);
             const vehicleModel = findPair(['modelo']) || findByPatterns([/(?:modelo)\s*:?\s*([^\n]+)/i]);
-            const vehicleYear = findPair(['año', 'ano']) || findByPatterns([/(?:año|ano)\s*:?\s*([^\n]+)/i]);
+            const vehicleYear = findPair(['ano']) || findByPatterns([/(?:ano)\s*:?\s*([^\n]+)/i]);
             const vehicleColor = findPair(['color']) || findByPatterns([/(?:color)\s*:?\s*([^\n]+)/i]);
             const resolvedPlate = findPair(['patente', 'ppu']) ||
                 findByPatterns([/(?:patente|ppu)\s*:?\s*([^\n]+)/i]) ||
@@ -2443,7 +2935,7 @@ private fun formatVersionLabel(versionName: String?, versionCode: Long?): String
 private fun formatByteCountSuffix(bytes: Long?): String {
     val safeBytes = bytes?.takeIf { it > 0 } ?: return ""
     val sizeInMegabytes = safeBytes.toDouble() / (1024.0 * 1024.0)
-    return " • ${"%.1f".format(sizeInMegabytes)} MB"
+    return " - ${"%.1f".format(sizeInMegabytes)} MB"
 }
 
 @Composable

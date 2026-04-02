@@ -72,6 +72,14 @@ data class AppUpdateUiState(
     val lastCheckedAtEpochMillis: Long? = null,
 )
 
+data class PendingImageReview(
+    val imageUri: String,
+    val source: String,
+    val rawText: String,
+    val recognizedPlates: List<String> = emptyList(),
+    val selectedLocation: GeoPoint? = null,
+)
+
 data class AppUiState(
     val allSightings: List<PlateSighting> = emptyList(),
     val filteredSightings: List<PlateSighting> = emptyList(),
@@ -86,7 +94,9 @@ data class AppUiState(
     val intervalSeconds: Int = 5,
     val intervalRunning: Boolean = false,
     val statusMessage: String = "Ready for capture",
+    val pendingManualImageUri: String? = null,
     val hasPendingManualImage: Boolean = false,
+    val pendingImageReview: PendingImageReview? = null,
     val lastRecognizedPlates: List<String> = emptyList(),
     val theoreticalRadiusMeters: Double = 0.0,
     val syncDiagnostics: SyncDiagnostics = SyncDiagnostics(),
@@ -107,7 +117,9 @@ private data class RuntimeInputs(
     val intervalSeconds: Int,
     val intervalRunning: Boolean,
     val statusMessage: String,
+    val pendingManualImageUri: String?,
     val hasPendingManualImage: Boolean,
+    val pendingImageReview: PendingImageReview?,
 )
 
 class AppViewModel(
@@ -129,6 +141,7 @@ class AppViewModel(
     private val statusMessage = MutableStateFlow("Ready for capture")
     private val pendingManualImageUri = MutableStateFlow<String?>(null)
     private val pendingManualSource = MutableStateFlow<String?>(null)
+    private val pendingImageReview = MutableStateFlow<PendingImageReview?>(null)
     private val lastRecognizedPlates = MutableStateFlow<List<String>>(emptyList())
     private val currentLocation = MutableStateFlow<GeoPoint?>(null)
     private val locationStatus = MutableStateFlow(LocationStatus.CHECKING)
@@ -163,8 +176,9 @@ class AppViewModel(
     private val captureStatus = combine(
         statusMessage,
         pendingManualImageUri,
-    ) { status, manualImageUri ->
-        status to (manualImageUri != null)
+        pendingImageReview,
+    ) { status, manualImageUri, imageReview ->
+        Triple(status, manualImageUri, manualImageUri != null) to imageReview
     }
 
     private val runtimeInputs = combine(
@@ -179,8 +193,10 @@ class AppViewModel(
             captureMode = mode,
             intervalSeconds = interval,
             intervalRunning = running,
-            statusMessage = captureStatus.first,
-            hasPendingManualImage = captureStatus.second,
+            statusMessage = captureStatus.first.first,
+            pendingManualImageUri = captureStatus.first.second,
+            hasPendingManualImage = captureStatus.first.third,
+            pendingImageReview = captureStatus.second,
         )
     }
 
@@ -247,7 +263,9 @@ class AppViewModel(
             intervalSeconds = interval,
             intervalRunning = running,
             statusMessage = status,
+            pendingManualImageUri = runtime.pendingManualImageUri,
             hasPendingManualImage = runtime.hasPendingManualImage,
+            pendingImageReview = runtime.pendingImageReview,
             lastRecognizedPlates = recognized,
             theoreticalRadiusMeters = theoreticalRadius,
             syncDiagnostics = syncDiagnostics,
@@ -322,22 +340,20 @@ class AppViewModel(
 
     fun saveManualPlate(plateNumber: String) {
         viewModelScope.launch {
-            val normalizedPlate = plateNumber
-                .uppercase()
-                .filter(Char::isLetterOrDigit)
+            val normalizedPlates = parsePlateInput(plateNumber)
 
-            if (normalizedPlate.length !in 5..10) {
-                statusMessage.value = "Enter a valid plate with 5 to 10 letters or numbers"
+            if (normalizedPlates.isEmpty()) {
+                statusMessage.value = "Enter at least one valid plate with 5 to 10 letters or numbers"
                 return@launch
             }
 
-            lastRecognizedPlates.value = listOf(normalizedPlate)
+            lastRecognizedPlates.value = normalizedPlates
             val imageUri = pendingManualImageUri.value
             val source = pendingManualSource.value?.let { "${it}_manual" } ?: "manual_entry"
 
             saveSightings(
-                recognizedPlates = listOf(normalizedPlate),
-                rawText = normalizedPlate,
+                recognizedPlates = normalizedPlates,
+                rawText = normalizedPlates.joinToString(", "),
                 imageUri = imageUri,
                 source = source,
             )
@@ -350,6 +366,41 @@ class AppViewModel(
         clearPendingManualImage(deleteImage = true)
         if (hadPendingImage) {
             statusMessage.value = "Unsaved photo discarded"
+        }
+    }
+
+    fun updatePendingImageReviewLocation(location: GeoPoint) {
+        pendingImageReview.update { review ->
+            review?.copy(selectedLocation = location)
+        }
+    }
+
+    fun savePendingImageReview(plateInput: String) {
+        viewModelScope.launch {
+            val review = pendingImageReview.value ?: return@launch
+            val normalizedPlates = parsePlateInput(plateInput)
+            if (normalizedPlates.isEmpty()) {
+                statusMessage.value = "Enter at least one valid plate with 5 to 10 letters or numbers"
+                return@launch
+            }
+
+            lastRecognizedPlates.value = normalizedPlates
+            saveSightings(
+                recognizedPlates = normalizedPlates,
+                rawText = review.rawText.ifBlank { normalizedPlates.joinToString(", ") },
+                imageUri = review.imageUri,
+                source = review.source,
+                locationOverride = review.selectedLocation,
+            )
+            clearPendingImageReview(deleteImage = false)
+        }
+    }
+
+    fun discardPendingImageReview() {
+        val hadPendingReview = pendingImageReview.value != null
+        clearPendingImageReview(deleteImage = true)
+        if (hadPendingReview) {
+            statusMessage.value = "Uploaded photo discarded"
         }
     }
 
@@ -366,11 +417,32 @@ class AppViewModel(
                 plateRecognizer.recognize(appContext, persistedImageUri)
             }.getOrElse {
                 lastRecognizedPlates.value = emptyList()
+                if (source == "gallery") {
+                    openPendingImageReview(
+                        imageUri = persistedImageUri.toString(),
+                        source = source,
+                        rawText = "",
+                        recognizedPlates = emptyList(),
+                    )
+                    statusMessage.value = "Pan the map to set the uploaded photo location, then enter the plate to save"
+                    return@launch
+                }
                 replacePendingManualImage(persistedImageUri.toString(), source)
                 statusMessage.value = (it.message ?: "Plate recognition failed") + ". Tap Write plate to save it manually"
                 return@launch
             }
             lastRecognizedPlates.value = recognition.plates
+
+            if (source == "gallery") {
+                openPendingImageReview(
+                    imageUri = persistedImageUri.toString(),
+                    source = source,
+                    rawText = recognition.rawText,
+                    recognizedPlates = recognition.plates,
+                )
+                statusMessage.value = "Pan the map to set the uploaded photo location, then confirm the plate"
+                return@launch
+            }
 
             if (recognition.plates.isEmpty()) {
                 replacePendingManualImage(persistedImageUri.toString(), source)
@@ -393,9 +465,10 @@ class AppViewModel(
         rawText: String,
         imageUri: String?,
         source: String,
+        locationOverride: GeoPoint? = null,
     ): List<String> {
         statusMessage.value = "Getting GPS position"
-        val location = currentLocationProvider.getCurrentLocation()
+        val location = locationOverride ?: currentLocationProvider.getCurrentLocation()
         val savedPlates = repository.saveSightings(
             recognizedPlates = recognizedPlates,
             rawText = rawText,
@@ -442,6 +515,36 @@ class AppViewModel(
         pendingManualImageUri.value = null
         pendingManualSource.value = null
     }
+
+    private suspend fun openPendingImageReview(
+        imageUri: String,
+        source: String,
+        rawText: String,
+        recognizedPlates: List<String>,
+    ) {
+        val fallbackLocation = currentLocation.value ?: currentLocationProvider.getCurrentLocation()
+        pendingImageReview.value = PendingImageReview(
+            imageUri = imageUri,
+            source = source,
+            rawText = rawText,
+            recognizedPlates = recognizedPlates,
+            selectedLocation = fallbackLocation,
+        )
+    }
+
+    private fun clearPendingImageReview(deleteImage: Boolean) {
+        val review = pendingImageReview.value
+        if (deleteImage && review != null) {
+            imageStore.delete(Uri.parse(review.imageUri))
+        }
+        pendingImageReview.value = null
+    }
+
+    private fun parsePlateInput(plateInput: String): List<String> = plateInput
+        .split(',', '\n', '\t', ' ')
+        .map { candidate -> candidate.uppercase().filter(Char::isLetterOrDigit) }
+        .filter { it.length in 5..10 }
+        .distinct()
 
     fun buildSelectedPlateSharePayload(): String? {
         val plateNumber = uiState.value.selectedPlate ?: return null
