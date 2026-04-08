@@ -142,6 +142,13 @@ class FirebaseRemoteSyncDataSource(
                         capturedAtEpochMillis = capturedAtEpochMillis,
                         updatedAtEpochMillis = updatedAtEpochMillis,
                         source = document.getString("source").orEmpty(),
+                        lookupSource = document.getString("lookupSource"),
+                        lookupOwnerName = document.getString("lookupOwnerName"),
+                        lookupOwnerRut = document.getString("lookupOwnerRut"),
+                        lookupVehicleMake = document.getString("lookupVehicleMake"),
+                        lookupVehicleModel = document.getString("lookupVehicleModel"),
+                        lookupVehicleYear = document.getString("lookupVehicleYear"),
+                        lookupVehicleColor = document.getString("lookupVehicleColor"),
                     )
                 }
 
@@ -200,6 +207,13 @@ class FirebaseRemoteSyncDataSource(
                 "capturedAtEpochMillis" to sighting.capturedAtEpochMillis,
                 "updatedAtEpochMillis" to updatedAtEpochMillis,
                 "source" to sighting.source,
+                "lookupSource" to sighting.lookupSource,
+                "lookupOwnerName" to sighting.lookupOwnerName,
+                "lookupOwnerRut" to sighting.lookupOwnerRut,
+                "lookupVehicleMake" to sighting.lookupVehicleMake,
+                "lookupVehicleModel" to sighting.lookupVehicleModel,
+                "lookupVehicleYear" to sighting.lookupVehicleYear,
+                "lookupVehicleColor" to sighting.lookupVehicleColor,
                 "serverTimestamp" to FieldValue.serverTimestamp(),
             )
 
@@ -351,24 +365,41 @@ class FirebaseRemoteSyncDataSource(
     }
 
     private fun storageFallbackWarning(exception: Exception): String? {
-        if (exception is StorageException) {
-            return "Cloud image upload is unavailable; the sighting was shared without its photo."
-        }
+        val reason = when (exception) {
+            is StorageException -> mapStorageExceptionReason(exception)
+            else -> mapStorageMessageReason(exception.message)
+        } ?: return null
 
-        val message = exception.message?.lowercase().orEmpty()
-        return if (
-            "billing" in message ||
-            "bucket" in message ||
-            "quota" in message ||
-            "permission" in message ||
-            "unauthorized" in message ||
-            "forbidden" in message ||
-            "project not found" in message ||
-            "storage is not available" in message
-        ) {
-            "Cloud image upload is unavailable; the sighting was shared without its photo."
-        } else {
-            null
+        return "$reason Shared without photo."
+    }
+
+    private fun mapStorageExceptionReason(exception: StorageException): String {
+        return when (exception.errorCode) {
+            StorageException.ERROR_BUCKET_NOT_FOUND -> "Firebase Storage bucket not found."
+            StorageException.ERROR_PROJECT_NOT_FOUND -> "Firebase project not found for Storage."
+            StorageException.ERROR_QUOTA_EXCEEDED -> "Firebase Storage quota exceeded."
+            StorageException.ERROR_NOT_AUTHENTICATED -> "Firebase Storage requires an authenticated session."
+            StorageException.ERROR_NOT_AUTHORIZED -> "Firebase Storage permission denied by rules."
+            StorageException.ERROR_RETRY_LIMIT_EXCEEDED -> "Firebase Storage upload timed out after retries."
+            StorageException.ERROR_INVALID_CHECKSUM -> "Firebase Storage rejected the upload because the file checksum did not match."
+            StorageException.ERROR_CANCELED -> "Firebase Storage upload was canceled."
+            else -> mapStorageMessageReason(exception.message) ?: "Firebase Storage upload failed."
+        }
+    }
+
+    private fun mapStorageMessageReason(message: String?): String? {
+        val normalizedMessage = message?.lowercase().orEmpty()
+        return when {
+            normalizedMessage.isBlank() -> null
+            "billing" in normalizedMessage -> "Firebase Storage billing is required for this bucket."
+            "bucket" in normalizedMessage -> "Firebase Storage bucket is unavailable."
+            "quota" in normalizedMessage -> "Firebase Storage quota exceeded."
+            "permission" in normalizedMessage || "unauthorized" in normalizedMessage || "forbidden" in normalizedMessage -> "Firebase Storage permission denied by rules."
+            "project not found" in normalizedMessage -> "Firebase project not found for Storage."
+            "storage is not available" in normalizedMessage -> "Firebase Storage is not available for this project."
+            else -> message?.trim()?.takeIf { it.isNotBlank() }?.let {
+                if (it.endsWith('.')) it else "$it."
+            }
         }
     }
 }

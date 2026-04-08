@@ -202,6 +202,56 @@ class SightingRepository(
         return null
     }
 
+    suspend fun updatePlateLookup(
+        plateNumber: String,
+        lookupSource: String,
+        ownerName: String?,
+        ownerRut: String?,
+        vehicleMake: String?,
+        vehicleModel: String?,
+        vehicleYear: String?,
+        vehicleColor: String?,
+    ) {
+        val normalizedPlate = plateNumber.trim().uppercase()
+        if (normalizedPlate.isBlank()) {
+            return
+        }
+
+        val sightings = dao.getByPlateNumber(normalizedPlate)
+        if (sightings.isEmpty()) {
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val nextSyncState = if (remoteSyncDataSource.isConfigured) {
+            PlateSyncState.PENDING_UPLOAD.name
+        } else {
+            PlateSyncState.LOCAL_ONLY.name
+        }
+
+        dao.insertAll(
+            sightings.map { sighting ->
+                sighting.copy(
+                    lookupSource = lookupSource,
+                    lookupOwnerName = ownerName,
+                    lookupOwnerRut = ownerRut,
+                    lookupVehicleMake = vehicleMake,
+                    lookupVehicleModel = vehicleModel,
+                    lookupVehicleYear = vehicleYear,
+                    lookupVehicleColor = vehicleColor,
+                    syncState = nextSyncState,
+                    syncError = null,
+                    updatedAtEpochMillis = now,
+                )
+            }
+        )
+
+        refreshDiagnostics(lastError = null, lastWarning = null)
+        if (remoteSyncDataSource.isConfigured) {
+            syncPendingSightings(clientGeneratedIds = sightings.map { it.clientGeneratedId })
+        }
+    }
+
     suspend fun switchActiveGroup(groupId: String) {
         if (!remoteSyncDataSource.isConfigured) {
             refreshDiagnostics(lastError = null, lastWarning = null)

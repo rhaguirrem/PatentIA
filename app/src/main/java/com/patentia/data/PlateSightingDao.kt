@@ -21,6 +21,9 @@ interface PlateSightingDao {
     @Query("SELECT * FROM plate_sightings WHERE clientGeneratedId IN (:clientGeneratedIds) ORDER BY capturedAtEpochMillis ASC")
     suspend fun getByClientGeneratedIds(clientGeneratedIds: List<String>): List<PlateSighting>
 
+    @Query("SELECT * FROM plate_sightings WHERE plateNumber = :plateNumber ORDER BY capturedAtEpochMillis ASC")
+    suspend fun getByPlateNumber(plateNumber: String): List<PlateSighting>
+
     @Query("SELECT COUNT(*) FROM plate_sightings WHERE syncState IN (:syncStates)")
     suspend fun countBySyncStates(syncStates: List<String>): Int
 
@@ -99,6 +102,13 @@ interface PlateSightingDao {
         """
         UPDATE plate_sightings
         SET plateNumber = :plateNumber,
+            lookupSource = NULL,
+            lookupOwnerName = NULL,
+            lookupOwnerRut = NULL,
+            lookupVehicleMake = NULL,
+            lookupVehicleModel = NULL,
+            lookupVehicleYear = NULL,
+            lookupVehicleColor = NULL,
             syncState = :syncState,
             syncError = NULL,
             updatedAtEpochMillis = :updatedAtEpochMillis

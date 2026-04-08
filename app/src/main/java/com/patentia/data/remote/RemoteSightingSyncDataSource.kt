@@ -61,6 +61,13 @@ data class RemotePlateSighting(
     val capturedAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
     val source: String,
+    val lookupSource: String? = null,
+    val lookupOwnerName: String? = null,
+    val lookupOwnerRut: String? = null,
+    val lookupVehicleMake: String? = null,
+    val lookupVehicleModel: String? = null,
+    val lookupVehicleYear: String? = null,
+    val lookupVehicleColor: String? = null,
 )
 
 data class RemoteUploadResult(
@@ -91,6 +98,13 @@ fun RemotePlateSighting.toLocalEntity(
     capturedAtEpochMillis = capturedAtEpochMillis,
     updatedAtEpochMillis = updatedAtEpochMillis,
     source = source,
+    lookupSource = lookupSource ?: existing?.lookupSource,
+    lookupOwnerName = lookupOwnerName ?: existing?.lookupOwnerName,
+    lookupOwnerRut = lookupOwnerRut ?: existing?.lookupOwnerRut,
+    lookupVehicleMake = lookupVehicleMake ?: existing?.lookupVehicleMake,
+    lookupVehicleModel = lookupVehicleModel ?: existing?.lookupVehicleModel,
+    lookupVehicleYear = lookupVehicleYear ?: existing?.lookupVehicleYear,
+    lookupVehicleColor = lookupVehicleColor ?: existing?.lookupVehicleColor,
     syncState = PlateSyncState.SYNCED.name,
     syncError = existing?.syncError?.takeIf { imageUri == null },
     lastSyncedAtEpochMillis = System.currentTimeMillis(),

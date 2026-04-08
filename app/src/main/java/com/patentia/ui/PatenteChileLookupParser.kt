@@ -40,6 +40,7 @@ private data class PatenteChileLookupPayload(
     val vehicleModel: String?,
     val vehicleYear: String?,
     val vehicleColor: String?,
+    val noResult: Boolean,
     val rawText: String?,
     val rawHtml: String?,
     val scriptPayloads: List<String>,
@@ -65,6 +66,9 @@ internal fun parsePatenteChileLookupPayload(decodedResult: String): PatenteChile
 
     val jsonObject = runCatching { JSONObject(decodedResult) }.getOrNull() ?: return null
     val payload = jsonObject.toLookupPayload()
+    if (payload.noResult) {
+        return null
+    }
     val rawText = payload.rawText.orEmpty()
     val rawHtml = payload.rawHtml.orEmpty()
     val scriptPayload = payload.scriptPayloads.joinToString("\n")
@@ -172,6 +176,7 @@ internal fun parsePatenteChileLookupPayload(decodedResult: String): PatenteChile
                 Regex("\"color\"\\s*:\\s*\"([^\",}{]{2,})\"", RegexOption.IGNORE_CASE),
                 Regex("(?:color)\\s*[:\\-]?\\s*([^\\n<\",}{]{2,})", RegexOption.IGNORE_CASE),
             ),
+            accept = ::isValidVehicleColorCandidate,
         ),
     )
 
@@ -187,6 +192,7 @@ private fun JSONObject.toLookupPayload(): PatenteChileLookupPayload {
         vehicleModel = optString("vehicleModel").trim().ifBlank { null },
         vehicleYear = optString("vehicleYear").trim().ifBlank { null },
         vehicleColor = optString("vehicleColor").trim().ifBlank { null },
+        noResult = optBoolean("noResult", false),
         rawText = optString("rawText").trim().ifBlank { null },
         rawHtml = optString("rawHtml").trim().ifBlank { null },
         scriptPayloads = optJSONArray("scriptPayloads").toStringList(),
@@ -244,6 +250,7 @@ private fun resolveLookupField(
     lineLabels: List<String>,
     regexes: List<Regex>,
     transform: (String) -> String = ::normalizeLookupValue,
+    accept: (String) -> Boolean = { true },
 ): String? {
     val candidates = listOfNotNull(
         directValue,
@@ -255,8 +262,32 @@ private fun resolveLookupField(
     return candidates
         .map(transform)
         .map(::cleanupLookupCandidate)
-        .firstOrNull { it.isNotBlank() }
+        .firstOrNull { it.isNotBlank() && accept(it) }
         ?.ifBlank { null }
+}
+
+private fun isValidVehicleColorCandidate(value: String): Boolean {
+    val normalizedValue = normalizeLookupKey(value)
+    if (normalizedValue.isBlank()) {
+        return false
+    }
+
+    val cssIndicators = listOf(
+        "display",
+        "inline-block",
+        "overflow",
+        "visibility",
+        "background",
+        "font",
+        "padding",
+        "margin",
+        "transparent",
+    )
+
+    return !value.contains(';') &&
+        !value.contains('{') &&
+        !value.contains('}') &&
+        cssIndicators.none { normalizedValue.contains(it) }
 }
 
 private fun extractFromLines(lines: List<String>, labels: List<String>): String? {

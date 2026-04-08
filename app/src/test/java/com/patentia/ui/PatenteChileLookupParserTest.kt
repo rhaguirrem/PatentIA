@@ -50,6 +50,66 @@ class PatenteChileLookupParserTest {
     }
 
     @Test
+    fun `parsePatenteChileLookupPayload preserves direct values from alternate providers`() {
+        val lookup = parsePatenteChileLookupPayload(
+            """
+            {
+              "plateNumber":"CXDL88",
+              "ownerName":"RODRIGUEZ CORTES JAIME SEBASTIAN",
+              "ownerRut":"17.016.877-1",
+              "vehicleMake":"TOYOTA",
+              "vehicleModel":"YARIS SPORT 1.3",
+              "vehicleYear":"2011"
+            }
+            """.trimIndent()
+        )
+
+        assertNotNull(lookup)
+        assertEquals("CXDL88", lookup?.plateNumber)
+        assertEquals("RODRIGUEZ CORTES JAIME SEBASTIAN", lookup?.ownerName)
+        assertEquals("17.016.877-1", lookup?.ownerRut)
+        assertEquals("TOYOTA", lookup?.vehicleMake)
+        assertEquals("YARIS SPORT 1.3", lookup?.vehicleModel)
+        assertEquals("2011", lookup?.vehicleYear)
+        assertNull(lookup?.vehicleColor)
+    }
+
+    @Test
+    fun `parsePatenteChileLookupPayload ignores css style noise when resolving vehicle color`() {
+        val lookup = parsePatenteChileLookupPayload(
+            """
+            {
+              "plateNumber":"CZWJ15",
+              "ownerName":"NUNEZ BARRAZA KATHERINE LORENA",
+              "ownerRut":"14.552.733-3",
+              "vehicleMake":"CHEVROLET",
+              "vehicleModel":"AVEO LII HB 1.4",
+              "vehicleYear":"2011",
+              "rawHtml":"<div style=\"color: transparent; display: inline-block; overflow: visible;\">ad</div>"
+            }
+            """.trimIndent()
+        )
+
+        assertNotNull(lookup)
+        assertNull(lookup?.vehicleColor)
+    }
+
+    @Test
+    fun `parsePatenteChileLookupPayload returns null when provider reports no result`() {
+        val lookup = parsePatenteChileLookupPayload(
+            """
+            {
+              "plateNumber":"ZZZZ99",
+              "noResult":true,
+              "rawText":"Mostrando resultados para: ZZZZ99\nPatente Tipo Marca Modelo RUT Nro. Motor Año Nombre a Rutificador"
+            }
+            """.trimIndent()
+        )
+
+        assertNull(lookup)
+    }
+
+    @Test
     fun `parsePatenteChileLookupPayload returns null when no meaningful fields exist`() {
         val lookup = parsePatenteChileLookupPayload("""{"plateNumber":"ABCD12","rawText":"Busqueda sin coincidencias"}""")
 

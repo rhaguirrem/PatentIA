@@ -35,6 +35,8 @@ enum class CaptureMode {
     INTERVAL,
 }
 
+private const val INTERVAL_CAPTURE_SOURCE = "camera_interval"
+
 enum class TimeFilter {
     ALL,
     LAST_24_HOURS,
@@ -121,6 +123,19 @@ private data class RuntimeInputs(
     val hasPendingManualImage: Boolean,
     val pendingImageReview: PendingImageReview?,
 )
+
+internal fun calculateTheoreticalRadiusMeters(
+    sightings: List<PlateSighting>,
+    nowEpochMillis: Long = System.currentTimeMillis(),
+): Double {
+    val latestWithPosition = sightings.lastOrNull {
+        it.latitude != null && it.longitude != null
+    } ?: return 0.0
+
+    val elapsedMillis = (nowEpochMillis - latestWithPosition.capturedAtEpochMillis).coerceAtLeast(0)
+    val maxMetersPerSecond = 130.0 * 1000.0 / 3600.0
+    return maxMetersPerSecond * (elapsedMillis / 1000.0)
+}
 
 class AppViewModel(
     private val appContext: Context,
@@ -239,15 +254,7 @@ class AppViewModel(
             .filter { it.plateNumber == selected }
             .sortedBy { it.capturedAtEpochMillis }
 
-        val latestWithPosition = selectedHistory.lastOrNull {
-            it.latitude != null && it.longitude != null
-        }
-
-        val theoreticalRadius = latestWithPosition?.let {
-            val elapsedMillis = (System.currentTimeMillis() - it.capturedAtEpochMillis).coerceAtLeast(0)
-            val maxMetersPerSecond = 130.0 * 1000.0 / 3600.0
-            maxMetersPerSecond * (elapsedMillis / 1000.0)
-        } ?: 0.0
+        val theoreticalRadius = calculateTheoreticalRadiusMeters(selectedHistory)
 
         AppUiState(
             allSightings = sightings,
@@ -427,6 +434,13 @@ class AppViewModel(
                     statusMessage.value = "Pan the map to set the uploaded photo location, then enter the plate to save"
                     return@launch
                 }
+                if (source == INTERVAL_CAPTURE_SOURCE) {
+                    discardIntervalCapture(
+                        imageUri = persistedImageUri,
+                        message = (it.message ?: "Plate recognition failed") + ". Interval capture discarded the photo"
+                    )
+                    return@launch
+                }
                 replacePendingManualImage(persistedImageUri.toString(), source)
                 statusMessage.value = (it.message ?: "Plate recognition failed") + ". Tap Write plate to save it manually"
                 return@launch
@@ -445,6 +459,13 @@ class AppViewModel(
             }
 
             if (recognition.plates.isEmpty()) {
+                if (source == INTERVAL_CAPTURE_SOURCE) {
+                    discardIntervalCapture(
+                        imageUri = persistedImageUri,
+                        message = "No plate pattern recognized. Interval capture discarded the photo"
+                    )
+                    return@launch
+                }
                 replacePendingManualImage(persistedImageUri.toString(), source)
                 statusMessage.value = "No plate pattern recognized. Tap Write plate to save it manually"
                 return@launch
@@ -458,6 +479,11 @@ class AppViewModel(
                 source = source,
             )
         }
+    }
+
+    private fun discardIntervalCapture(imageUri: Uri, message: String) {
+        imageStore.delete(imageUri)
+        statusMessage.value = message
     }
 
     private suspend fun saveSightings(
@@ -546,15 +572,21 @@ class AppViewModel(
         .filter { it.length in 5..10 }
         .distinct()
 
-    fun buildSelectedPlateSharePayload(): String? {
-        val plateNumber = uiState.value.selectedPlate ?: return null
-        val history = uiState.value.selectedPlateHistory
+    fun buildPlateSharePayload(plateNumber: String): String? {
+        val normalizedPlate = plateNumber.trim().uppercase()
+        if (normalizedPlate.isBlank()) {
+            return null
+        }
+
+        val history = uiState.value.allSightings
+            .filter { it.plateNumber == normalizedPlate }
+            .sortedBy { it.capturedAtEpochMillis }
         if (history.isEmpty()) {
             return null
         }
 
         val payload = ExportedPlateHistory(
-            plateNumber = plateNumber,
+            plateNumber = normalizedPlate,
             sharedAtEpochMillis = System.currentTimeMillis(),
             sightings = history.map { it.toExportModel() },
         )
@@ -562,6 +594,27 @@ class AppViewModel(
         return Json {
             prettyPrint = true
         }.encodeToString(payload)
+    }
+
+    fun buildSelectedPlateSharePayload(): String? {
+        val plateNumber = uiState.value.selectedPlate ?: return null
+        return buildPlateSharePayload(plateNumber)
+    }
+
+    internal fun storePlateLookup(lookup: PatenteChileLookup) {
+        viewModelScope.launch {
+            repository.updatePlateLookup(
+                plateNumber = lookup.plateNumber,
+                lookupSource = VOLANTE_O_MALETA_LOOKUP_SOURCE,
+                ownerName = lookup.ownerName,
+                ownerRut = lookup.ownerRut,
+                vehicleMake = lookup.vehicleMake,
+                vehicleModel = lookup.vehicleModel,
+                vehicleYear = lookup.vehicleYear,
+                vehicleColor = lookup.vehicleColor,
+            )
+            statusMessage.value = "Stored Volante o Maleta data for ${lookup.plateNumber}"
+        }
     }
 
     fun retrySighting(clientGeneratedId: String) {

@@ -83,6 +83,33 @@ class SightingRepositoryTest {
         assertNotNull(dao.findSighting("remote"))
     }
 
+    @Test
+    fun `updatePlateLookup stores lookup fields for every matching sighting`() = runBlocking {
+        val dao = FakePlateSightingDao(
+            listOf(
+                sighting(clientGeneratedId = "one"),
+                sighting(clientGeneratedId = "two"),
+                sighting(clientGeneratedId = "other", plateNumber = "ZZZZ99"),
+            )
+        )
+        val repository = SightingRepository(dao, FakeRemoteSightingSyncDataSource())
+
+        repository.updatePlateLookup(
+            plateNumber = "ABCD12",
+            lookupSource = "volante_o_maleta",
+            ownerName = "Jane Roe",
+            ownerRut = "12.345.678-9",
+            vehicleMake = "Toyota",
+            vehicleModel = "Yaris",
+            vehicleYear = "2020",
+            vehicleColor = "Rojo",
+        )
+
+        assertEquals("Jane Roe", dao.requireSighting("one").lookupOwnerName)
+        assertEquals("Toyota", dao.requireSighting("two").lookupVehicleMake)
+        assertNull(dao.requireSighting("other").lookupOwnerName)
+    }
+
     private fun createTempImageFile(): File {
         val file = File.createTempFile("shared-image", ".jpg")
         file.writeText("test")
@@ -92,6 +119,7 @@ class SightingRepositoryTest {
 
     private fun sighting(
         clientGeneratedId: String,
+        plateNumber: String = "ABCD12",
         imageUri: String? = null,
         remoteId: String? = null,
         groupId: String? = null,
@@ -101,7 +129,7 @@ class SightingRepositoryTest {
         remoteId = remoteId,
         groupId = groupId,
         createdBy = null,
-        plateNumber = "ABCD12",
+        plateNumber = plateNumber,
         rawText = "ABCD12",
         imageUri = imageUri,
         latitude = null,
@@ -170,6 +198,10 @@ class SightingRepositoryTest {
 
         override suspend fun getByClientGeneratedIds(clientGeneratedIds: List<String>): List<PlateSighting> = sightings
             .filter { it.clientGeneratedId in clientGeneratedIds }
+            .sortedBy { it.capturedAtEpochMillis }
+
+        override suspend fun getByPlateNumber(plateNumber: String): List<PlateSighting> = sightings
+            .filter { it.plateNumber == plateNumber }
             .sortedBy { it.capturedAtEpochMillis }
 
         override suspend fun countBySyncStates(syncStates: List<String>): Int =

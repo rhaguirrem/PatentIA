@@ -1,6 +1,7 @@
 package com.patentia.ui
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -47,11 +48,13 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Route
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Timer
@@ -140,6 +143,21 @@ private enum class AppPanel(val label: String) {
     History("History"),
     About("About"),
 }
+
+private enum class PlateLookupProvider(
+    val displayName: String,
+    val homeUrl: String,
+) {
+    VOLANTE_O_MALETA(
+        displayName = "Volante o Maleta",
+        homeUrl = VOLANTE_O_MALETA_HOME_URL,
+    ),
+}
+
+private data class PlateLookupRequest(
+    val plateNumber: String,
+    val provider: PlateLookupProvider,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -290,16 +308,15 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 onSearchChange = viewModel::updateSearchQuery,
                                 onRepeatedOnlyChange = viewModel::setRepeatedOnly,
                                 onTimeFilterChange = viewModel::setTimeFilter,
-                                onSelectPlate = viewModel::selectPlate,
-                                onShareSelected = {
-                                    viewModel.buildSelectedPlateSharePayload()?.let { payload ->
+                                onSharePlate = { plateNumber ->
+                                    viewModel.buildPlateSharePayload(plateNumber)?.let { payload ->
                                         shareText(context, payload)
                                     }
                                 },
+                                onStoreLookup = viewModel::storePlateLookup,
                                 onEditSightingPlate = viewModel::updateSightingPlate,
                                 onRetrySighting = viewModel::retrySighting,
                                 onDeleteSighting = viewModel::deleteSighting,
-                                onDeleteLocalImage = viewModel::removeLocalImage,
                                 initialImageUri = pendingHistoryImageUri,
                                 onInitialImageConsumed = { pendingHistoryImageUri = null },
                             )
@@ -1908,22 +1925,37 @@ private fun HistoryScreen(
     onSearchChange: (String) -> Unit,
     onRepeatedOnlyChange: (Boolean) -> Unit,
     onTimeFilterChange: (TimeFilter) -> Unit,
-    onSelectPlate: (String?) -> Unit,
-    onShareSelected: () -> Unit,
+    onSharePlate: (String) -> Unit,
+    onStoreLookup: (PatenteChileLookup) -> Unit,
     onEditSightingPlate: (String, String?, String) -> Unit,
     onRetrySighting: (String) -> Unit,
     onDeleteSighting: (String, String?) -> Unit,
-    onDeleteLocalImage: (String, String?) -> Unit,
     initialImageUri: String?,
     onInitialImageConsumed: () -> Unit,
 ) {
     var fullScreenImageUri by remember { mutableStateOf<String?>(null) }
-    var patenteChileLookupPlate by remember { mutableStateOf<String?>(null) }
+    var plateLookupRequest by remember { mutableStateOf<PlateLookupRequest?>(null) }
     var editingSighting by remember { mutableStateOf<PlateSighting?>(null) }
     var pendingDeleteSighting by remember { mutableStateOf<PlateSighting?>(null) }
-    var pendingDeleteImage by remember { mutableStateOf<PlateSighting?>(null) }
-    var patenteChileLookupCache by remember { mutableStateOf<Map<String, PatenteChileLookup>>(emptyMap()) }
-    val selectedPlateLookup = uiState.selectedPlate?.let { patenteChileLookupCache[it] }
+    val plateHistorySummaries = remember(uiState.allSightings) {
+        uiState.allSightings
+            .groupBy { it.plateNumber }
+            .mapValues { (_, sightings) ->
+                val sortedSightings = sightings.sortedBy { it.capturedAtEpochMillis }
+                PlateHistorySummary(
+                    observationCount = sortedSightings.size,
+                    theoreticalRadiusMeters = calculateTheoreticalRadiusMeters(sortedSightings),
+                )
+            }
+    }
+
+    fun openPlateLookup(plateNumber: String?) {
+        val resolvedPlate = plateNumber?.takeIf { it.isNotBlank() } ?: return
+        plateLookupRequest = PlateLookupRequest(
+            plateNumber = resolvedPlate,
+            provider = PlateLookupProvider.VOLANTE_O_MALETA,
+        )
+    }
 
     LaunchedEffect(initialImageUri) {
         if (!initialImageUri.isNullOrBlank()) {
@@ -1942,68 +1974,6 @@ private fun HistoryScreen(
             onRepeatedOnlyChange = onRepeatedOnlyChange,
             onTimeFilterChange = onTimeFilterChange,
         )
-        if (uiState.selectedPlate != null) {
-            Card(
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    AssistChip(
-                        onClick = { },
-                        label = {
-                            Text("${uiState.selectedPlate} | ${uiState.selectedPlateHistory.size} obs | ${uiState.theoreticalRadiusMeters.toInt()} m")
-                        },
-                        colors = AssistChipDefaults.assistChipColors(
-                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.25f),
-                            labelColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        ),
-                    )
-                    selectedPlateLookup?.ownerChipLabel?.let { ownerChip ->
-                        AssistChip(
-                            onClick = { patenteChileLookupPlate = uiState.selectedPlate },
-                            label = { Text(ownerChip) },
-                        )
-                    }
-                    selectedPlateLookup?.vehicleChipLabel?.let { vehicleChip ->
-                        AssistChip(
-                            onClick = { patenteChileLookupPlate = uiState.selectedPlate },
-                            label = { Text(vehicleChip) },
-                        )
-                    }
-                    selectedPlateLookup?.colorChipLabel?.let { colorChip ->
-                        AssistChip(
-                            onClick = { patenteChileLookupPlate = uiState.selectedPlate },
-                            label = { Text("Color $colorChip") },
-                        )
-                    }
-                    AssistChip(
-                        onClick = { patenteChileLookupPlate = uiState.selectedPlate },
-                        label = { Text("PatenteChile") },
-                    )
-                    AssistChip(
-                        onClick = onShareSelected,
-                        label = { Text("Share") },
-                        leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
-                    )
-                    AssistChip(
-                        onClick = {
-                            editingSighting = uiState.selectedPlateHistory.lastOrNull()
-                        },
-                        label = { Text("Edit plate") },
-                    )
-                    IconButton(onClick = { onSelectPlate(null) }) {
-                        Icon(Icons.Default.Close, contentDescription = "Close plate details")
-                    }
-                }
-            }
-        }
         LazyColumn(
             modifier = Modifier.weight(1f, fill = true),
             contentPadding = PaddingValues(bottom = 12.dp),
@@ -2012,17 +1982,12 @@ private fun HistoryScreen(
             items(uiState.filteredSightings, key = { it.id }) { sighting ->
                 HistoryRow(
                     sighting = sighting,
-                    lookup = patenteChileLookupCache[sighting.plateNumber],
-                    isSelected = uiState.selectedPlate == sighting.plateNumber,
-                    onClick = {
-                        onSelectPlate(
-                            if (uiState.selectedPlate == sighting.plateNumber) null else sighting.plateNumber
-                        )
+                    lookup = sighting.toStoredLookup(),
+                    historySummary = plateHistorySummaries[sighting.plateNumber] ?: PlateHistorySummary(),
+                    onOpenLookup = {
+                        openPlateLookup(sighting.plateNumber)
                     },
-                    onOpenPatenteChile = {
-                        onSelectPlate(sighting.plateNumber)
-                        patenteChileLookupPlate = sighting.plateNumber
-                    },
+                    onShareHistory = { onSharePlate(sighting.plateNumber) },
                     onEditPlate = {
                         editingSighting = sighting
                     },
@@ -2030,9 +1995,6 @@ private fun HistoryScreen(
                     onOpenImage = { imageUri -> fullScreenImageUri = imageUri },
                     onDeleteSighting = {
                         pendingDeleteSighting = sighting
-                    },
-                    onDeleteImage = {
-                        pendingDeleteImage = sighting
                     },
                 )
             }
@@ -2046,12 +2008,14 @@ private fun HistoryScreen(
         )
     }
 
-    patenteChileLookupPlate?.let { plateNumber ->
-        PatenteChileLookupDialog(
-            plateNumber = plateNumber,
-            onDismiss = { patenteChileLookupPlate = null },
+    plateLookupRequest?.let { request ->
+        PlateLookupDialog(
+            plateNumber = request.plateNumber,
+            provider = request.provider,
+            onDismiss = { plateLookupRequest = null },
             onLookupResolved = { lookup ->
-                patenteChileLookupCache = patenteChileLookupCache + (lookup.plateNumber to lookup)
+                onStoreLookup(lookup)
+                plateLookupRequest = null
             },
         )
     }
@@ -2066,22 +2030,6 @@ private fun HistoryScreen(
             onSave = { plateNumber ->
                 onEditSightingPlate(sighting.clientGeneratedId, sighting.plateNumber, plateNumber)
                 editingSighting = null
-            },
-        )
-    }
-
-    pendingDeleteImage?.let { sighting ->
-        DestructiveConfirmationDialog(
-            title = "Delete local image?",
-            message = "This will remove the stored photo for ${sighting.plateNumber} from this device. The sighting record will stay in history.",
-            confirmLabel = "Delete image",
-            onDismiss = { pendingDeleteImage = null },
-            onConfirm = {
-                onDeleteLocalImage(sighting.clientGeneratedId, sighting.imageUri)
-                if (fullScreenImageUri == sighting.imageUri) {
-                    fullScreenImageUri = null
-                }
-                pendingDeleteImage = null
             },
         )
     }
@@ -2135,181 +2083,209 @@ private fun FilterPanel(
     onRepeatedOnlyChange: (Boolean) -> Unit,
     onTimeFilterChange: (TimeFilter) -> Unit,
 ) {
+    var filtersVisible by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(uiState.searchQuery) {
+        if (uiState.searchQuery.isNotBlank()) {
+            filtersVisible = true
+        }
+    }
+
     Card(shape = RoundedCornerShape(24.dp)) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            OutlinedTextField(
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                value = uiState.searchQuery,
-                onValueChange = onSearchChange,
-                label = { Text("Search licence") },
-                singleLine = true,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = uiState.repeatedOnly,
-                    onClick = { onRepeatedOnlyChange(!uiState.repeatedOnly) },
-                    label = { Text("Repeated only") },
-                    colors = patentIAFilterChipColors(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                AssistChip(
+                    onClick = { filtersVisible = !filtersVisible },
+                    label = { Text(if (filtersVisible) "Hide search" else "Search") },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = null)
+                    },
                 )
-                FilterChip(
-                    selected = uiState.timeFilter == TimeFilter.ALL,
-                    onClick = { onTimeFilterChange(TimeFilter.ALL) },
-                    label = { Text("All") },
-                    colors = patentIAFilterChipColors(),
+            }
+            if (filtersVisible) {
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = uiState.searchQuery,
+                    onValueChange = onSearchChange,
+                    label = { Text("Search licence") },
+                    singleLine = true,
                 )
-                FilterChip(
-                    selected = uiState.timeFilter == TimeFilter.LAST_24_HOURS,
-                    onClick = { onTimeFilterChange(TimeFilter.LAST_24_HOURS) },
-                    label = { Text("24 h") },
-                    colors = patentIAFilterChipColors(),
-                )
-                FilterChip(
-                    selected = uiState.timeFilter == TimeFilter.LAST_7_DAYS,
-                    onClick = { onTimeFilterChange(TimeFilter.LAST_7_DAYS) },
-                    label = { Text("7 d") },
-                    colors = patentIAFilterChipColors(),
-                )
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = uiState.repeatedOnly,
+                        onClick = { onRepeatedOnlyChange(!uiState.repeatedOnly) },
+                        label = { Text("Repeated only") },
+                        colors = patentIAFilterChipColors(),
+                    )
+                    FilterChip(
+                        selected = uiState.timeFilter == TimeFilter.ALL,
+                        onClick = { onTimeFilterChange(TimeFilter.ALL) },
+                        label = { Text("All") },
+                        colors = patentIAFilterChipColors(),
+                    )
+                    FilterChip(
+                        selected = uiState.timeFilter == TimeFilter.LAST_24_HOURS,
+                        onClick = { onTimeFilterChange(TimeFilter.LAST_24_HOURS) },
+                        label = { Text("24 h") },
+                        colors = patentIAFilterChipColors(),
+                    )
+                    FilterChip(
+                        selected = uiState.timeFilter == TimeFilter.LAST_7_DAYS,
+                        onClick = { onTimeFilterChange(TimeFilter.LAST_7_DAYS) },
+                        label = { Text("7 d") },
+                        colors = patentIAFilterChipColors(),
+                    )
+                }
             }
         }
     }
 }
 
+private data class PlateHistorySummary(
+    val observationCount: Int = 0,
+    val theoreticalRadiusMeters: Double = 0.0,
+)
+
 @Composable
 private fun HistoryRow(
     sighting: PlateSighting,
     lookup: PatenteChileLookup?,
-    isSelected: Boolean,
-    onClick: () -> Unit,
-    onOpenPatenteChile: () -> Unit,
+    historySummary: PlateHistorySummary,
+    onOpenLookup: () -> Unit,
+    onShareHistory: () -> Unit,
     onEditPlate: () -> Unit,
     onRetry: () -> Unit,
     onOpenImage: (String) -> Unit,
     onDeleteSighting: () -> Unit,
-    onDeleteImage: () -> Unit,
 ) {
     val context = LocalContext.current
     val isImageDisplayable = remember(context, sighting.imageUri) {
         isImageDisplayable(context, sighting.imageUri)
     }
-    val hasAccessibleLocalImage = remember(context, sighting.imageUri) {
-        hasAccessibleLocalImage(context, sighting.imageUri)
-    }
 
     Card(
-        onClick = onClick,
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
-        ),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
     ) {
-        Box(modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                if (isImageDisplayable) {
-                    AsyncImage(
-                        model = sighting.imageUri,
-                        contentDescription = sighting.plateNumber,
-                        modifier = Modifier
-                            .size(92.dp)
-                            .heightIn(min = 92.dp)
-                            .clickable { sighting.imageUri?.let(onOpenImage) },
-                        contentScale = ContentScale.Crop,
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(92.dp)
-                            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(16.dp)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Default.CloudOff, contentDescription = null)
-                    }
-                }
-
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (isImageDisplayable) {
+                AsyncImage(
+                    model = sighting.imageUri,
+                    contentDescription = sighting.plateNumber,
+                    modifier = Modifier
+                        .size(92.dp)
+                        .heightIn(min = 92.dp)
+                        .clickable { sighting.imageUri?.let(onOpenImage) },
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(92.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(16.dp)),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Text(sighting.plateNumber, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                    Text(formatTimestamp(sighting.capturedAtEpochMillis), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        when {
-                            sighting.latitude != null && sighting.longitude != null -> "${sighting.latitude}, ${sighting.longitude}"
-                            else -> "No GPS fix"
-                        },
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text("Source: ${sighting.source}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(syncStateLabel(sighting), color = syncStateColor(sighting), fontWeight = FontWeight.SemiBold)
-                    sighting.syncError?.let {
-                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    lookup?.ownerChipLabel?.let { ownerChip ->
-                        AssistChip(
-                            onClick = onOpenPatenteChile,
-                            label = { Text(ownerChip) },
-                        )
-                    }
-                    lookup?.vehicleChipLabel?.let { vehicleChip ->
-                        AssistChip(
-                            onClick = onOpenPatenteChile,
-                            label = { Text(vehicleChip) },
-                        )
-                    }
-                    lookup?.colorChipLabel?.let { colorChip ->
-                        AssistChip(
-                            onClick = onOpenPatenteChile,
-                            label = { Text("Color $colorChip") },
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AssistChip(
-                            onClick = onOpenPatenteChile,
-                            label = { Text("PatenteChile") },
-                        )
-                        AssistChip(
-                            onClick = onEditPlate,
-                            label = { Text("Edit plate") },
-                        )
-                        if (isSelected) {
-                            AssistChip(
-                                onClick = onClick,
-                                label = { Text("Hide details") },
-                            )
-                        }
-                    }
-                    if (hasAccessibleLocalImage) {
-                        TextButton(onClick = onDeleteImage) {
-                            Text("Delete local image")
-                        }
-                    }
-                    if (sighting.syncState == PlateSyncState.SYNC_ERROR.name) {
-                        OutlinedButton(onClick = onRetry) {
-                            Icon(Icons.Default.Sync, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Retry upload")
-                        }
-                    }
+                    Icon(Icons.Default.CloudOff, contentDescription = null)
                 }
             }
 
-            IconButton(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(6.dp),
-                onClick = onDeleteSighting,
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Delete history entry",
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = sighting.plateNumber,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Black,
+                    )
+                    IconButton(
+                        modifier = Modifier.size(36.dp),
+                        onClick = onEditPlate,
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = "Edit plate")
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    IconButton(
+                        modifier = Modifier.size(36.dp),
+                        onClick = onDeleteSighting,
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete history entry")
+                    }
+                }
+                Text(
+                    text = "${historySummary.observationCount} obs | ${historySummary.theoreticalRadiusMeters.toInt()} m",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.SemiBold,
                 )
+                Text(formatTimestamp(sighting.capturedAtEpochMillis), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    when {
+                        sighting.latitude != null && sighting.longitude != null -> "${sighting.latitude}, ${sighting.longitude}"
+                        else -> "No GPS fix"
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text("Source: ${sighting.source}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(syncStateLabel(sighting), color = syncStateColor(sighting), fontWeight = FontWeight.SemiBold)
+                lookup?.ownerChipLabel?.let { ownerChip ->
+                    AssistChip(
+                        onClick = onOpenLookup,
+                        label = { Text(ownerChip) },
+                    )
+                }
+                lookup?.vehicleChipLabel?.let { vehicleChip ->
+                    AssistChip(
+                        onClick = onOpenLookup,
+                        label = { Text(vehicleChip) },
+                    )
+                }
+                lookup?.colorChipLabel?.let { colorChip ->
+                    AssistChip(
+                        onClick = onOpenLookup,
+                        label = { Text("Color $colorChip") },
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AssistChip(
+                        onClick = onOpenLookup,
+                        label = { Text("Volante o Maleta") },
+                    )
+                    IconButton(
+                        modifier = Modifier.size(40.dp),
+                        onClick = onShareHistory,
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = "Share plate history")
+                    }
+                }
+                if (sighting.syncState == PlateSyncState.SYNC_ERROR.name) {
+                    OutlinedButton(onClick = onRetry) {
+                        Icon(Icons.Default.Sync, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retry upload")
+                    }
+                }
             }
         }
     }
@@ -2358,20 +2334,32 @@ private fun FullScreenImageDialog(
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun PatenteChileLookupDialog(
+private fun PlateLookupDialog(
     plateNumber: String,
+    provider: PlateLookupProvider,
     onDismiss: () -> Unit,
     onLookupResolved: (PatenteChileLookup) -> Unit,
 ) {
     val context = LocalContext.current
-    var isLoading by rememberSaveable(plateNumber) { mutableStateOf(true) }
-    var searchTriggered by rememberSaveable(plateNumber) { mutableStateOf(false) }
-    var lookupResolved by rememberSaveable(plateNumber) { mutableStateOf(false) }
+    var isLoading by rememberSaveable(plateNumber, provider) { mutableStateOf(true) }
+    var searchTriggered by rememberSaveable(plateNumber, provider) { mutableStateOf(false) }
+    var lookupResolved by rememberSaveable(plateNumber, provider) { mutableStateOf(false) }
+    var webViewReference by remember { mutableStateOf<WebView?>(null) }
     val normalizedPlate = remember(plateNumber) {
         plateNumber.trim().uppercase()
     }
-    val searchScript = remember(normalizedPlate) {
-        buildPatenteChileAutofillScript(normalizedPlate)
+    val searchScript = remember(normalizedPlate, provider) {
+        buildPlateLookupAutofillScript(provider, normalizedPlate)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webViewReference?.apply {
+                stopLoading()
+                destroy()
+            }
+            webViewReference = null
+        }
     }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -2397,14 +2385,14 @@ private fun PatenteChileLookupDialog(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        Text("PatenteChile lookup", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text("${provider.displayName} lookup", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
                         Text(
                             text = "Public web search for $normalizedPlate",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { openBrowserUrl(context, PATENTE_CHILE_HOME_URL) }) {
+                        TextButton(onClick = { openBrowserUrl(context, provider.homeUrl) }) {
                             Text("Browser")
                         }
                         TextButton(onClick = onDismiss) {
@@ -2423,6 +2411,7 @@ private fun PatenteChileLookupDialog(
                         modifier = Modifier.fillMaxSize(),
                         factory = { webContext ->
                             WebView(webContext).apply {
+                                webViewReference = this
                                 settings.javaScriptEnabled = true
                                 settings.domStorageEnabled = true
                                 settings.javaScriptCanOpenWindowsAutomatically = false
@@ -2434,18 +2423,20 @@ private fun PatenteChileLookupDialog(
 
                                     override fun onPageFinished(view: WebView, url: String) {
                                         val normalizedUrl = url.substringBefore('#').removeSuffix("/")
-                                        if (!searchTriggered && normalizedUrl == PATENTE_CHILE_HOME_URL.removeSuffix("/")) {
+                                        if (!searchTriggered && normalizedUrl == provider.homeUrl.removeSuffix("/")) {
                                             searchTriggered = true
                                             view.evaluateJavascript(searchScript, null)
                                             return
                                         }
                                         if (!lookupResolved) {
-                                            attemptPatenteChileLookupExtraction(
+                                            attemptPlateLookupExtraction(
                                                 webView = view,
                                                 plateNumber = normalizedPlate,
+                                                provider = provider,
                                                 onLookupResolved = { lookup ->
                                                     lookupResolved = true
                                                     onLookupResolved(lookup)
+                                                    onDismiss()
                                                 },
                                                 onFinished = {
                                                     isLoading = false
@@ -2456,7 +2447,7 @@ private fun PatenteChileLookupDialog(
                                         }
                                     }
                                 }
-                                loadUrl(PATENTE_CHILE_HOME_URL)
+                                loadUrl(provider.homeUrl)
                             }
                         },
                     )
@@ -2473,7 +2464,7 @@ private fun PatenteChileLookupDialog(
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
                                 CircularProgressIndicator()
-                                Text("Running PatenteChile search", color = Color.White)
+                                Text("Running ${provider.displayName} search", color = Color.White)
                             }
                         }
                     }
@@ -2589,7 +2580,7 @@ private fun syncSubtitle(syncDiagnostics: SyncDiagnostics): String {
     return when {
         !syncDiagnostics.isConfigured -> "Add google-services.json to enable Firebase Auth and Firestore."
         syncDiagnostics.lastError != null -> "${syncDiagnostics.lastError} - queued items stay local until retry succeeds."
-        syncDiagnostics.lastWarning != null -> "${syncDiagnostics.lastWarning} Firestore sharing still works, but remote devices will not see the photo until Storage is enabled."
+        syncDiagnostics.lastWarning != null -> "${syncDiagnostics.lastWarning} Firestore sharing still works, but remote devices will not see the photo until the storage issue is fixed."
         syncDiagnostics.pendingUploadCount > 0 -> "Queued sightings upload automatically when network and Firebase are available."
         syncDiagnostics.isSignedIn -> buildString {
             append("Signed in as ")
@@ -2668,6 +2659,13 @@ private fun isPermissionGranted(context: Context, permission: String): Boolean {
     return ContextCompat.checkSelfPermission(context, permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
 }
 
+private fun buildPlateLookupAutofillScript(
+    provider: PlateLookupProvider,
+    plateNumber: String,
+): String = when (provider) {
+    PlateLookupProvider.VOLANTE_O_MALETA -> buildVolanteOMaletaAutofillScript(plateNumber)
+}
+
 private fun buildPatenteChileAutofillScript(plateNumber: String): String {
     val escapedPlate = plateNumber
         .replace("\\", "\\\\")
@@ -2726,6 +2724,54 @@ private fun buildPatenteChileAutofillScript(plateNumber: String): String {
                     return true;
                 }
                 input.focus();
+                return true;
+            };
+
+            if (triggerSearch()) {
+                return true;
+            }
+
+            let attempts = 0;
+            const intervalId = setInterval(() => {
+                attempts += 1;
+                if (triggerSearch() || attempts >= 80) {
+                    clearInterval(intervalId);
+                }
+            }, 250);
+            return true;
+        })();
+    """.trimIndent()
+}
+
+private fun buildVolanteOMaletaAutofillScript(plateNumber: String): String {
+    val escapedPlate = plateNumber
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+
+    return """
+        (function() {
+            const plate = '$escapedPlate';
+
+            const triggerSearch = () => {
+                const form = document.querySelector("form[action='patente']");
+                const input = form ? form.querySelector("input[name='term']") : document.querySelector("input[name='term']");
+                const button = form ? form.querySelector("button[type='submit'], input[type='submit']") : null;
+                if (!form || !input) {
+                    return false;
+                }
+                input.focus();
+                input.value = plate;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                if (typeof form.requestSubmit === 'function') {
+                    form.requestSubmit(button || undefined);
+                    return true;
+                }
+                if (button) {
+                    button.click();
+                    return true;
+                }
+                form.submit();
                 return true;
             };
 
@@ -2875,14 +2921,110 @@ private fun buildPatenteChileExtractionScript(plateNumber: String): String {
     """.trimIndent()
 }
 
-private fun attemptPatenteChileLookupExtraction(
+private fun buildVolanteOMaletaExtractionScript(plateNumber: String): String {
+    val escapedPlate = plateNumber
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+
+    return """
+        (function() {
+            const expectedPlate = '$escapedPlate';
+            const normalize = (value) => (value || '')
+                .replace(/\u00a0/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            const normalizeKey = (value) => normalize(value)
+                .toLowerCase()
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '');
+            const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+            const rawHtml = document.documentElement ? (document.documentElement.outerHTML || '') : '';
+            const pairs = [];
+            const resultTable = Array.from(document.querySelectorAll('table')).find((table) => {
+                const headers = Array.from(table.querySelectorAll('tr:first-child th, thead th'))
+                    .map((cell) => normalizeKey(cell.innerText || cell.textContent || ''));
+                return headers.some((header) => header.includes('patente')) &&
+                    headers.some((header) => header.includes('marca')) &&
+                    headers.some((header) => header.includes('modelo')) &&
+                    headers.some((header) => header.includes('rut'));
+            });
+
+            let resolvedPlate = expectedPlate;
+            let ownerName = '';
+            let ownerRut = '';
+            let vehicleMake = '';
+            let vehicleModel = '';
+            let vehicleYear = '';
+            let noResult = true;
+
+            if (resultTable) {
+                const rows = Array.from(resultTable.querySelectorAll('tr'));
+                const headerRow = rows.find((row) => row.querySelectorAll('th').length > 0) || rows[0];
+                const headers = Array.from(headerRow.querySelectorAll('th, td')).map((cell) => normalizeKey(cell.innerText || cell.textContent || ''));
+                const structuredRows = rows
+                    .filter((row) => row !== headerRow && row.querySelectorAll('td').length > 0)
+                    .map((row) => {
+                        const cells = Array.from(row.querySelectorAll('td')).map((cell) => normalize(cell.innerText || cell.textContent || ''));
+                        const mapped = {};
+                        headers.forEach((header, index) => {
+                            mapped[header] = cells[index] || '';
+                        });
+                        return mapped;
+                    });
+                const matchingRow = structuredRows.find((row) => normalize(row['patente']).toUpperCase() === expectedPlate) ||
+                    structuredRows.find((row) => Object.values(row).some((value) => {
+                        const normalizedValue = normalize(value);
+                        return normalizedValue && normalizedValue !== '-';
+                    })) ||
+                    null;
+
+                if (matchingRow) {
+                    noResult = false;
+                    resolvedPlate = normalize(matchingRow['patente'] || expectedPlate).toUpperCase();
+                    ownerName = normalize(matchingRow['nombre a rutificador'] || matchingRow['nombre']);
+                    ownerRut = normalize(matchingRow['rut']).toUpperCase();
+                    vehicleMake = normalize(matchingRow['marca']);
+                    vehicleModel = normalize(matchingRow['modelo']);
+                    vehicleYear = normalize(matchingRow['ano'] || matchingRow['año']);
+                    Object.entries(matchingRow).forEach(([label, value]) => {
+                        const normalizedValue = normalize(value);
+                        if (label && normalizedValue && normalizedValue !== '-') {
+                            pairs.push([label, normalizedValue]);
+                        }
+                    });
+                }
+            }
+
+            return JSON.stringify({
+                plateNumber: normalize(resolvedPlate || expectedPlate).toUpperCase(),
+                ownerName,
+                ownerRut,
+                vehicleMake,
+                vehicleModel,
+                vehicleYear,
+                vehicleColor: '',
+                noResult,
+                rawText: rawText.slice(0, 50000),
+                rawHtml: '',
+                scriptPayloads: [],
+                labeledPairs: pairs,
+            });
+        })();
+    """.trimIndent()
+}
+
+private fun attemptPlateLookupExtraction(
     webView: WebView,
     plateNumber: String,
+    provider: PlateLookupProvider,
     onLookupResolved: (PatenteChileLookup) -> Unit,
     onFinished: () -> Unit,
     remainingAttempts: Int = 14,
 ) {
-    webView.evaluateJavascript(buildPatenteChileExtractionScript(plateNumber)) { rawResult ->
+    val extractionScript = when (provider) {
+        PlateLookupProvider.VOLANTE_O_MALETA -> buildVolanteOMaletaExtractionScript(plateNumber)
+    }
+    webView.evaluateJavascript(extractionScript) { rawResult ->
         val lookup = parsePatenteChileLookupResult(rawResult)
         if (lookup != null && lookup.hasMeaningfulData()) {
             onLookupResolved(lookup)
@@ -2893,9 +3035,10 @@ private fun attemptPatenteChileLookupExtraction(
         if (remainingAttempts > 1) {
             webView.postDelayed(
                 {
-                    attemptPatenteChileLookupExtraction(
+                    attemptPlateLookupExtraction(
                         webView = webView,
                         plateNumber = plateNumber,
+                        provider = provider,
                         onLookupResolved = onLookupResolved,
                         onFinished = onFinished,
                         remainingAttempts = remainingAttempts - 1,
@@ -2915,10 +3058,17 @@ private fun openBrowserUrl(context: Context, url: String) {
 
 private fun shareText(context: Context, text: String) {
     val intent = Intent(Intent.ACTION_SEND).apply {
-        type = "application/json"
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, "PatentIA plate history")
         putExtra(Intent.EXTRA_TEXT, text)
     }
-    context.startActivity(Intent.createChooser(intent, "Share plate history"))
+    val chooser = Intent.createChooser(intent, "Share plate history")
+    if (context !is Activity) {
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching {
+        context.startActivity(chooser)
+    }
 }
 
 private fun formatTimestamp(epochMillis: Long): String {
@@ -2946,7 +3096,21 @@ private fun patentIAFilterChipColors() = FilterChipDefaults.filterChipColors(
     selectedTrailingIconColor = MaterialTheme.colorScheme.onPrimary,
 )
 
-private const val PATENTE_CHILE_HOME_URL = "https://www.patentechile.com/"
+private const val VOLANTE_O_MALETA_HOME_URL = "https://www.volanteomaleta.com/"
+internal const val VOLANTE_O_MALETA_LOOKUP_SOURCE = "volante_o_maleta"
+
+private fun PlateSighting.toStoredLookup(): PatenteChileLookup? {
+    val lookup = PatenteChileLookup(
+        plateNumber = plateNumber,
+        ownerName = lookupOwnerName,
+        ownerRut = lookupOwnerRut,
+        vehicleMake = lookupVehicleMake,
+        vehicleModel = lookupVehicleModel,
+        vehicleYear = lookupVehicleYear,
+        vehicleColor = lookupVehicleColor,
+    )
+    return lookup.takeIf { it.hasMeaningfulData() }
+}
 
 private val patentIAColorScheme = androidx.compose.material3.darkColorScheme(
     primary = Color(0xFF5AD1B2),
