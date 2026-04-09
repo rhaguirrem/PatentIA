@@ -1581,6 +1581,7 @@ private fun MapScreen(
     var controlsVisible by rememberSaveable { mutableStateOf(false) }
     var mapLoaded by rememberSaveable { mutableStateOf(false) }
     var showMapTroubleshooting by rememberSaveable { mutableStateOf(false) }
+    var hasInitializedCamera by rememberSaveable { mutableStateOf(false) }
     val isMapsConfigured = BuildConfig.IS_MAPS_API_KEY_CONFIGURED
     val mapProperties = remember(currentLocation) {
         MapProperties(
@@ -1614,19 +1615,26 @@ private fun MapScreen(
         }
         val focus = selectedPath.lastOrNull() ?: mappedSightings.firstOrNull()
         if (focus != null) {
-            cameraPositionState.move(
-                CameraUpdateFactory.newLatLngZoom(
-                    LatLng(focus.latitude ?: return@LaunchedEffect, focus.longitude ?: return@LaunchedEffect),
-                    12f,
-                )
+            val position = LatLng(
+                focus.latitude ?: return@LaunchedEffect,
+                focus.longitude ?: return@LaunchedEffect,
             )
+            val update = if (hasInitializedCamera) {
+                CameraUpdateFactory.newLatLng(position)
+            } else {
+                CameraUpdateFactory.newLatLngZoom(position, 12f)
+            }
+            cameraPositionState.move(update)
+            hasInitializedCamera = true
         } else if (currentLocation != null) {
-            cameraPositionState.move(
-                CameraUpdateFactory.newLatLngZoom(
-                    LatLng(currentLocation.latitude, currentLocation.longitude),
-                    15f,
-                )
-            )
+            val position = LatLng(currentLocation.latitude, currentLocation.longitude)
+            val update = if (hasInitializedCamera) {
+                CameraUpdateFactory.newLatLng(position)
+            } else {
+                CameraUpdateFactory.newLatLngZoom(position, 15f)
+            }
+            cameraPositionState.move(update)
+            hasInitializedCamera = true
         }
     }
 
@@ -1980,10 +1988,13 @@ private fun HistoryScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             items(uiState.filteredSightings, key = { it.id }) { sighting ->
+                val activeUserId = uiState.syncDiagnostics.activeUserId
+                val canDelete = sighting.createdBy == null || sighting.createdBy == activeUserId
                 HistoryRow(
                     sighting = sighting,
                     lookup = sighting.toStoredLookup(),
                     historySummary = plateHistorySummaries[sighting.plateNumber] ?: PlateHistorySummary(),
+                    canDelete = canDelete,
                     onOpenLookup = {
                         openPlateLookup(sighting.plateNumber)
                     },
@@ -2165,6 +2176,7 @@ private fun HistoryRow(
     onEditPlate: () -> Unit,
     onRetry: () -> Unit,
     onOpenImage: (String) -> Unit,
+    canDelete: Boolean = true,
     onDeleteSighting: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -2223,11 +2235,13 @@ private fun HistoryRow(
                         Icon(Icons.Default.Edit, contentDescription = "Edit plate")
                     }
                     Spacer(modifier = Modifier.weight(1f))
-                    IconButton(
-                        modifier = Modifier.size(36.dp),
-                        onClick = onDeleteSighting,
-                    ) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete history entry")
+                    if (canDelete) {
+                        IconButton(
+                            modifier = Modifier.size(36.dp),
+                            onClick = onDeleteSighting,
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete history entry")
+                        }
                     }
                 }
                 Text(
@@ -2438,6 +2452,11 @@ private fun PlateLookupDialog(
                                                     onLookupResolved(lookup)
                                                     onDismiss()
                                                 },
+                                                onNoResult = {
+                                                    lookupResolved = true
+                                                    isLoading = false
+                                                    onDismiss()
+                                                },
                                                 onFinished = {
                                                     isLoading = false
                                                 },
@@ -2515,7 +2534,7 @@ private fun syncHeadline(syncDiagnostics: SyncDiagnostics, fallbackStatus: Strin
     return when {
         !syncDiagnostics.isConfigured -> "Local-only mode"
         syncDiagnostics.lastError != null -> "Cloud sync delayed"
-        syncDiagnostics.lastWarning != null -> "Shared without cloud image"
+        syncDiagnostics.lastWarning != null -> syncDiagnostics.lastWarning
         syncDiagnostics.pendingUploadCount > 0 -> "Syncing ${syncDiagnostics.pendingUploadCount} pending"
         syncDiagnostics.isSignedIn -> "Shared group ${syncDiagnostics.activeGroupId ?: "-"}"
         else -> fallbackStatus
@@ -2569,7 +2588,7 @@ private fun syncTitle(syncDiagnostics: SyncDiagnostics): String {
     return when {
         !syncDiagnostics.isConfigured -> "Stored on this device only"
         syncDiagnostics.lastError != null -> "Cloud sync needs retry"
-        syncDiagnostics.lastWarning != null -> "Shared without cloud image"
+        syncDiagnostics.lastWarning != null -> syncDiagnostics.lastWarning
         syncDiagnostics.pendingUploadCount > 0 -> "Sync in progress"
         syncDiagnostics.isSignedIn -> "Live shared updates active"
         else -> "Preparing shared session"
@@ -2606,7 +2625,7 @@ private fun syncStateLabel(sighting: PlateSighting): String {
     return when (sighting.syncState) {
         PlateSyncState.LOCAL_ONLY.name -> "Local only"
         PlateSyncState.PENDING_UPLOAD.name -> "Pending cloud upload"
-        PlateSyncState.SYNCED.name -> if (sighting.syncError != null) "Shared without image" else "Shared"
+        PlateSyncState.SYNCED.name -> sighting.syncError ?: "Shared"
         PlateSyncState.SYNC_ERROR.name -> "Sync error"
         else -> sighting.syncState
     }
@@ -3018,6 +3037,7 @@ private fun attemptPlateLookupExtraction(
     plateNumber: String,
     provider: PlateLookupProvider,
     onLookupResolved: (PatenteChileLookup) -> Unit,
+    onNoResult: () -> Unit,
     onFinished: () -> Unit,
     remainingAttempts: Int = 14,
 ) {
@@ -3032,6 +3052,12 @@ private fun attemptPlateLookupExtraction(
             return@evaluateJavascript
         }
 
+        if (isPatenteChileLookupNoResult(rawResult)) {
+            onNoResult()
+            onFinished()
+            return@evaluateJavascript
+        }
+
         if (remainingAttempts > 1) {
             webView.postDelayed(
                 {
@@ -3040,6 +3066,7 @@ private fun attemptPlateLookupExtraction(
                         plateNumber = plateNumber,
                         provider = provider,
                         onLookupResolved = onLookupResolved,
+                        onNoResult = onNoResult,
                         onFinished = onFinished,
                         remainingAttempts = remainingAttempts - 1,
                     )

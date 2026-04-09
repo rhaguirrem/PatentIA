@@ -6,14 +6,12 @@ import com.patentia.BuildConfig
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.patentia.data.ExportedPlateHistory
 import com.patentia.data.PatentIADatabase
 import com.patentia.data.PlateSighting
 import com.patentia.data.SightingRepository
 import com.patentia.data.SyncDiagnostics
 import com.patentia.data.remote.FirebaseRemoteSyncDataSource
 import com.patentia.data.remote.NoOpRemoteSightingSyncDataSource
-import com.patentia.data.toExportModel
 import com.patentia.services.AppUpdateManager
 import com.patentia.services.AppImageStore
 import com.patentia.services.CurrentLocationProvider
@@ -26,8 +24,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
+
 import java.util.concurrent.TimeUnit
 
 enum class CaptureMode {
@@ -574,26 +571,47 @@ class AppViewModel(
 
     fun buildPlateSharePayload(plateNumber: String): String? {
         val normalizedPlate = plateNumber.trim().uppercase()
-        if (normalizedPlate.isBlank()) {
-            return null
-        }
+        if (normalizedPlate.isBlank()) return null
 
         val history = uiState.value.allSightings
             .filter { it.plateNumber == normalizedPlate }
             .sortedBy { it.capturedAtEpochMillis }
-        if (history.isEmpty()) {
-            return null
+        if (history.isEmpty()) return null
+
+        val fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        fun fmtTime(epoch: Long): String =
+            fmt.format(java.time.Instant.ofEpochMilli(epoch).atZone(java.time.ZoneId.systemDefault()))
+
+        val first = history.first()
+        val last = history.last()
+
+        val sb = StringBuilder()
+        sb.appendLine("PatentIA — $normalizedPlate")
+        sb.appendLine("Observations: ${history.size}")
+        sb.appendLine("First seen: ${fmtTime(first.capturedAtEpochMillis)}")
+        sb.appendLine("Last seen: ${fmtTime(last.capturedAtEpochMillis)}")
+
+        // Include lookup info if available
+        val lookup = history.firstOrNull { it.lookupOwnerName != null }
+        if (lookup != null) {
+            lookup.lookupOwnerName?.let { sb.appendLine("Owner: $it") }
+            val vehicle = listOfNotNull(
+                lookup.lookupVehicleMake,
+                lookup.lookupVehicleModel,
+                lookup.lookupVehicleYear,
+            ).joinToString(" ")
+            if (vehicle.isNotBlank()) sb.appendLine("Vehicle: $vehicle")
+            lookup.lookupVehicleColor?.let { sb.appendLine("Color: $it") }
         }
 
-        val payload = ExportedPlateHistory(
-            plateNumber = normalizedPlate,
-            sharedAtEpochMillis = System.currentTimeMillis(),
-            sightings = history.map { it.toExportModel() },
-        )
+        sb.appendLine()
+        history.forEachIndexed { i, s ->
+            val loc = if (s.latitude != null && s.longitude != null)
+                "${s.latitude}, ${s.longitude}" else "No GPS"
+            sb.appendLine("${i + 1}. ${fmtTime(s.capturedAtEpochMillis)} | $loc | ${s.source}")
+        }
 
-        return Json {
-            prettyPrint = true
-        }.encodeToString(payload)
+        return sb.toString().trimEnd()
     }
 
     fun buildSelectedPlateSharePayload(): String? {

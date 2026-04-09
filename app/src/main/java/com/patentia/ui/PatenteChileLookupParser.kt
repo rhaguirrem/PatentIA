@@ -48,15 +48,14 @@ private data class PatenteChileLookupPayload(
 )
 
 internal fun parsePatenteChileLookupResult(rawResult: String?): PatenteChileLookup? {
-    if (rawResult.isNullOrBlank() || rawResult == "null") {
-        return null
-    }
-
-    val decodedResult = runCatching {
-        JSONArray("[$rawResult]").getString(0)
-    }.getOrNull() ?: return null
-
+    val decodedResult = decodePatenteChileLookupResult(rawResult) ?: return null
     return parsePatenteChileLookupPayload(decodedResult)
+}
+
+internal fun isPatenteChileLookupNoResult(rawResult: String?): Boolean {
+    val decodedResult = decodePatenteChileLookupResult(rawResult) ?: return false
+    val jsonObject = runCatching { JSONObject(decodedResult) }.getOrNull() ?: return false
+    return jsonObject.toLookupPayload().noResult
 }
 
 internal fun parsePatenteChileLookupPayload(decodedResult: String): PatenteChileLookup? {
@@ -355,4 +354,14 @@ private fun normalizeLookupKey(value: String): String {
     val normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
         .replace(Regex("\\p{Mn}+"), "")
     return normalizeLookupValue(normalized).lowercase()
+}
+
+private fun decodePatenteChileLookupResult(rawResult: String?): String? {
+    if (rawResult.isNullOrBlank() || rawResult == "null") {
+        return null
+    }
+
+    return runCatching {
+        JSONArray("[$rawResult]").getString(0)
+    }.getOrNull()
 }

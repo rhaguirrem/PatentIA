@@ -110,6 +110,15 @@ class PatenteChileLookupParserTest {
     }
 
     @Test
+    fun `isPatenteChileLookupNoResult detects provider no result from raw webview payload`() {
+        val rawResult = "\"{\\\"plateNumber\\\":\\\"ZZZZ99\\\",\\\"noResult\\\":true}\""
+
+        val isNoResult = isPatenteChileLookupNoResult(rawResult)
+
+        assertEquals(true, isNoResult)
+    }
+
+    @Test
     fun `parsePatenteChileLookupPayload returns null when no meaningful fields exist`() {
         val lookup = parsePatenteChileLookupPayload("""{"plateNumber":"ABCD12","rawText":"Busqueda sin coincidencias"}""")
 

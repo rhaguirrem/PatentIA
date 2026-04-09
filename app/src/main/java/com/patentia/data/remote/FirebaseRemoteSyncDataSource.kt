@@ -337,16 +337,17 @@ class FirebaseRemoteSyncDataSource(
         val storageReference = Firebase.storage.reference.child(storagePath)
 
         return try {
-            val isReadable = when (uploadUri.scheme) {
-                "file" -> uploadUri.path?.let { File(it).exists() } == true
-                "content" -> appContext.contentResolver.openInputStream(uploadUri)?.use { true } ?: false
-                else -> true
+            val inputStream = when (uploadUri.scheme) {
+                "file" -> uploadUri.path?.let { File(it) }?.takeIf { it.exists() }?.inputStream()
+                else -> appContext.contentResolver.openInputStream(uploadUri)
             }
-            if (!isReadable) {
+            if (inputStream == null) {
                 return UploadedImageResult(errorMessage = "Local image file is not accessible")
             }
 
-            storageReference.putFile(uploadUri).await()
+            inputStream.use { stream ->
+                storageReference.putStream(stream).await()
+            }
             val downloadUrl = storageReference.downloadUrl.await().toString()
             UploadedImageResult(
                 downloadUrl = downloadUrl,
