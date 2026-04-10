@@ -139,9 +139,8 @@ import kotlin.math.abs
 private enum class AppPanel(val label: String) {
     Camera("Camera"),
     Map("Map"),
-    Cloudsync("Cloudsync"),
     History("History"),
-    About("About"),
+    Config("Config"),
 }
 
 private enum class PlateLookupProvider(
@@ -290,16 +289,6 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 },
                             )
 
-                            AppPanel.Cloudsync -> CloudSyncPanel(
-                                modifier = Modifier
-                                    .weight(1f, fill = true)
-                                    .fillMaxWidth(),
-                                uiState = uiState,
-                                onSwitchGroup = viewModel::switchActiveGroup,
-                                onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
-                                onRetryPendingSync = viewModel::retryPendingSync,
-                            )
-
                             AppPanel.History -> HistoryScreen(
                                 modifier = Modifier
                                     .weight(1f, fill = true)
@@ -321,14 +310,16 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 onInitialImageConsumed = { pendingHistoryImageUri = null },
                             )
 
-                            AppPanel.About -> AboutPanel(
+                            AppPanel.Config -> ConfigPanel(
                                 modifier = Modifier
                                     .weight(1f, fill = true)
                                     .fillMaxWidth(),
                                 uiState = uiState,
                                 hasCameraPermission = hasCameraPermission,
                                 hasLocationPermission = hasLocationPermission,
-                                onSelectPlate = viewModel::selectPlate,
+                                onSwitchGroup = viewModel::switchActiveGroup,
+                                onJoinOrCreateGroup = viewModel::joinOrCreateGroup,
+                                onRetryPendingSync = viewModel::retryPendingSync,
                                 onRefreshLocation = viewModel::refreshCurrentLocation,
                                 onCheckForUpdates = viewModel::checkForAppUpdate,
                                 onInstallUpdate = viewModel::installDownloadedUpdate,
@@ -457,35 +448,14 @@ private fun CameraPanel(
 }
 
 @Composable
-private fun CloudSyncPanel(
-    modifier: Modifier = Modifier,
-    uiState: AppUiState,
-    onSwitchGroup: (String) -> Unit,
-    onJoinOrCreateGroup: (String) -> Unit,
-    onRetryPendingSync: () -> Unit,
-) {
-    Column(
-        modifier = modifier
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        SyncStatusCard(
-            syncDiagnostics = uiState.syncDiagnostics,
-            onRetryPendingSync = onRetryPendingSync,
-            onSwitchGroup = onSwitchGroup,
-            onJoinOrCreateGroup = onJoinOrCreateGroup,
-        )
-    }
-}
-
-@Composable
-private fun AboutPanel(
+private fun ConfigPanel(
     modifier: Modifier = Modifier,
     uiState: AppUiState,
     hasCameraPermission: Boolean,
     hasLocationPermission: Boolean,
-    onSelectPlate: (String?) -> Unit,
+    onSwitchGroup: (String) -> Unit,
+    onJoinOrCreateGroup: (String) -> Unit,
+    onRetryPendingSync: () -> Unit,
     onRefreshLocation: () -> Unit,
     onCheckForUpdates: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -497,7 +467,16 @@ private fun AboutPanel(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        DriverSummaryCard(uiState = uiState, onSelectPlate = onSelectPlate)
+        SyncArchiveCard(syncDiagnostics = uiState.syncDiagnostics)
+        SyncGroupSelectorCard(
+            syncDiagnostics = uiState.syncDiagnostics,
+            onSwitchGroup = onSwitchGroup,
+        )
+        SyncStatusCard(
+            syncDiagnostics = uiState.syncDiagnostics,
+            onRetryPendingSync = onRetryPendingSync,
+            onJoinOrCreateGroup = onJoinOrCreateGroup,
+        )
         GpsStatusCard(
             locationStatus = uiState.locationStatus,
             currentLocation = uiState.currentLocation,
@@ -514,6 +493,33 @@ private fun AboutPanel(
             hasCameraPermission = hasCameraPermission,
             hasLocationPermission = hasLocationPermission,
         )
+    }
+}
+
+@Composable
+private fun SyncArchiveCard(
+    syncDiagnostics: SyncDiagnostics,
+) {
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AssistChip(
+                onClick = { },
+                label = { Text(syncTitle(syncDiagnostics)) },
+                leadingIcon = {
+                    Icon(Icons.Default.Sync, contentDescription = null)
+                },
+            )
+            Text(
+                text = syncSubtitle(syncDiagnostics),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -745,7 +751,6 @@ private fun DriverSummaryCard(
 private fun SyncStatusCard(
     syncDiagnostics: SyncDiagnostics,
     onRetryPendingSync: () -> Unit,
-    onSwitchGroup: (String) -> Unit,
     onJoinOrCreateGroup: (String) -> Unit,
 ) {
     val isCloudSyncAvailable = syncDiagnostics.isConfigured
@@ -769,21 +774,6 @@ private fun SyncStatusCard(
                 syncSubtitle(syncDiagnostics),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (isCloudSyncAvailable && syncDiagnostics.availableGroups.isNotEmpty()) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    syncDiagnostics.availableGroups.take(4).forEach { group ->
-                        FilterChip(
-                            selected = group.id == syncDiagnostics.activeGroupId,
-                            onClick = { onSwitchGroup(group.id) },
-                            label = { Text(group.name) },
-                            leadingIcon = {
-                                Icon(Icons.Default.Groups, contentDescription = null)
-                            },
-                            colors = patentIAFilterChipColors(),
-                        )
-                    }
-                }
-            }
             if (isCloudSyncAvailable) {
                 OutlinedTextField(
                     modifier = Modifier.fillMaxWidth(),
@@ -826,6 +816,49 @@ private fun SyncStatusCard(
                             label = { Text("Sync issue") },
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SyncGroupSelectorCard(
+    syncDiagnostics: SyncDiagnostics,
+    onSwitchGroup: (String) -> Unit,
+) {
+    if (!syncDiagnostics.isConfigured || syncDiagnostics.availableGroups.isEmpty()) {
+        return
+    }
+
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Shared groups",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "Choose which team group stays active for sync.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                syncDiagnostics.availableGroups.take(4).forEach { group ->
+                    FilterChip(
+                        selected = group.id == syncDiagnostics.activeGroupId,
+                        onClick = { onSwitchGroup(group.id) },
+                        label = { Text(group.name) },
+                        leadingIcon = {
+                            Icon(Icons.Default.Groups, contentDescription = null)
+                        },
+                        colors = patentIAFilterChipColors(),
+                    )
                 }
             }
         }
