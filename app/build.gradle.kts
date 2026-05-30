@@ -59,8 +59,8 @@ val isReleaseSigningConfigured = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
-val appVersionCode = 4
-val appVersionName = "0.1.3"
+val appVersionCode = 5
+val appVersionName = "0.1.4"
 val apkArchiveDir = File("G:/Mi unidad/Projects/PatentIA")
 val releaseApkFileName = "patentia-installer-release.apk"
 val releaseApkArchiveFileName = "patentia-installer-release-$appVersionName.apk"

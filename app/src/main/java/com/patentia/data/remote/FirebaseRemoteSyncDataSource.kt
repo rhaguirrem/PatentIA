@@ -44,7 +44,8 @@ class FirebaseRemoteSyncDataSource(
             currentUser.providerData.firstOrNull { it.providerId != "firebase" }?.providerId ?: "firebase-auth"
         }
 
-        val groups = listGroupsForUser(currentUser.uid).ifEmpty {
+        val fallbackGroupId = preferredGroupId ?: BuildConfig.DEFAULT_FIRESTORE_GROUP_ID
+        val groups = listGroupsForUser(currentUser.uid, fallbackGroupId).ifEmpty {
             if (preferredGroupId == null) {
                 listOf(ensureDefaultGroupMembership(currentUser.uid))
             } else {
@@ -70,7 +71,7 @@ class FirebaseRemoteSyncDataSource(
 
     override suspend fun listGroups(session: RemoteSyncSession): List<SharedGroup> {
         val userId = session.userId ?: return emptyList()
-        return listGroupsForUser(userId)
+        return listGroupsForUser(userId, session.groupId ?: BuildConfig.DEFAULT_FIRESTORE_GROUP_ID)
     }
 
     override suspend fun joinOrCreateGroup(
@@ -329,55 +330,61 @@ class FirebaseRemoteSyncDataSource(
         return SharedGroup(sanitizedGroupId, groupName)
     }
 
-    private suspend fun listGroupsForUser(userId: String): List<SharedGroup> {
+    private suspend fun listGroupsForUser(
+        userId: String,
+        fallbackGroupId: String,
+    ): List<SharedGroup> {
         val firestore = Firebase.firestore
         val groupsById = linkedMapOf<String, SharedGroup>()
 
-        val membershipSnapshots = firestore
-            .collectionGroup(MEMBERS_COLLECTION)
-            .whereEqualTo("userId", userId)
-            .get()
-            .await()
-
-        membershipSnapshots.documents.mapNotNull { memberDocument ->
-            val groupDocument = memberDocument.reference.parent.parent
-                ?: return@mapNotNull null
-            val groupSnapshot = runCatching {
-                groupDocument.get().await()
-            }.getOrNull()
-            if (groupSnapshot != null && !groupSnapshot.exists()) {
-                return@mapNotNull null
+        runCatching {
+            firestore
+                .collectionGroup(MEMBERS_COLLECTION)
+                .whereEqualTo("userId", userId)
+                .get()
+                .await()
+        }.getOrNull()?.documents.orEmpty().mapNotNull { memberDocument ->
+            memberDocument.reference.parent.parent?.let { groupDocument ->
+                loadGroup(groupDocument.id)
             }
-            SharedGroup(
-                id = groupDocument.id,
-                name = groupSnapshot?.getString("name") ?: groupDocument.id,
-            )
         }.forEach { group ->
             groupsById[group.id] = group
         }
 
-        val legacyGroupSnapshots = firestore
-            .collection(GROUPS_COLLECTION)
-            .get()
-            .await()
-
-        legacyGroupSnapshots.documents.forEach { groupSnapshot ->
-            val legacyMembership = runCatching {
-                groupSnapshot.reference.collection(MEMBERS_COLLECTION).document(userId).get().await()
-            }.getOrNull() ?: return@forEach
-            if (!legacyMembership.exists()) {
-                return@forEach
-            }
-            groupsById.putIfAbsent(
-                groupSnapshot.id,
-                SharedGroup(
-                    id = groupSnapshot.id,
-                    name = groupSnapshot.getString("name") ?: groupSnapshot.id,
-                ),
-            )
+        loadGroupIfMember(userId, fallbackGroupId)?.let { fallbackGroup ->
+            groupsById.putIfAbsent(fallbackGroup.id, fallbackGroup)
         }
 
         return groupsById.values.sortedBy { it.name }
+    }
+
+    private suspend fun loadGroupIfMember(
+        userId: String,
+        groupId: String,
+    ): SharedGroup? {
+        val sanitizedGroupId = sanitizeGroupId(groupId)
+        val groupDocument = Firebase.firestore.collection(GROUPS_COLLECTION).document(sanitizedGroupId)
+        val memberSnapshot = runCatching {
+            groupDocument.collection(MEMBERS_COLLECTION).document(userId).get().await()
+        }.getOrNull()
+        if (memberSnapshot?.exists() != true) {
+            return null
+        }
+        return loadGroup(sanitizedGroupId)
+    }
+
+    private suspend fun loadGroup(groupId: String): SharedGroup? {
+        val sanitizedGroupId = sanitizeGroupId(groupId)
+        val groupSnapshot = runCatching {
+            Firebase.firestore.collection(GROUPS_COLLECTION).document(sanitizedGroupId).get().await()
+        }.getOrNull()
+        if (groupSnapshot != null && !groupSnapshot.exists()) {
+            return null
+        }
+        return SharedGroup(
+            id = sanitizedGroupId,
+            name = groupSnapshot?.getString("name") ?: sanitizedGroupId,
+        )
     }
 
     private fun sanitizeGroupId(groupId: String): String {

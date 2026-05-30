@@ -21,6 +21,7 @@ service cloud.firestore {
       return isSelf(userId)
         && request.resource.data.joinedAtEpochMillis is int
         && request.resource.data.canUploadImages is bool
+        && (!request.resource.data.keys().hasAny(['userId']) || request.resource.data.userId == request.auth.uid)
         && (
           request.resource.data.role == 'member'
           || (
@@ -46,7 +47,7 @@ service cloud.firestore {
       allow update, delete: if isGroupAdmin(groupId);
 
       match /members/{userId} {
-        allow read: if isGroupMember(groupId) || isSelf(userId);
+        allow read: if isGroupMember(groupId) || isSelf(userId) || (signedIn() && resource.data.userId == request.auth.uid);
         allow create, update: if isGroupAdmin(groupId) || canWriteOwnMembership(groupId, userId);
         allow delete: if isGroupAdmin(groupId) || isSelf(userId);
       }
