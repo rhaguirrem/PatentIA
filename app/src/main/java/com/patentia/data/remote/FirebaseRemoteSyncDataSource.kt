@@ -34,7 +34,6 @@ class FirebaseRemoteSyncDataSource(
             return RemoteSyncSession(
                 isAvailable = false,
                 providerLabel = "firebase-auth",
-                groupId = BuildConfig.DEFAULT_FIRESTORE_GROUP_ID,
                 statusMessage = "Firebase anonymous sign-in failed",
             )
         }
@@ -45,10 +44,19 @@ class FirebaseRemoteSyncDataSource(
             currentUser.providerData.firstOrNull { it.providerId != "firebase" }?.providerId ?: "firebase-auth"
         }
 
-        val groups = listGroupsForUser(currentUser.uid)
-        val activeGroupId = preferredGroupId
-            ?: groups.firstOrNull()?.id
-            ?: BuildConfig.DEFAULT_FIRESTORE_GROUP_ID
+        val groups = listGroupsForUser(currentUser.uid).ifEmpty {
+            if (preferredGroupId == null) {
+                listOf(ensureDefaultGroupMembership(currentUser.uid))
+            } else {
+                emptyList()
+            }
+        }
+        val activeGroupId = preferredGroupId ?: groups.firstOrNull()?.id
+        val statusMessage = if (activeGroupId == null) {
+            "Join or create a shared group to start cloud sync"
+        } else {
+            "Connected to Firestore"
+        }
 
         return RemoteSyncSession(
             isAvailable = true,
@@ -56,7 +64,7 @@ class FirebaseRemoteSyncDataSource(
             userId = currentUser.uid,
             groupId = activeGroupId,
             availableGroups = groups,
-            statusMessage = "Connected to Firestore",
+            statusMessage = statusMessage,
         )
     }
 
@@ -70,39 +78,7 @@ class FirebaseRemoteSyncDataSource(
         groupId: String,
     ): SharedGroup {
         val userId = session.userId ?: throw IllegalStateException("No Firebase user session")
-        val sanitizedGroupId = sanitizeGroupId(groupId)
-        val groupDocument = Firebase.firestore.collection(GROUPS_COLLECTION).document(sanitizedGroupId)
-        val groupSnapshot = groupDocument.get().await()
-        val timestamp = System.currentTimeMillis()
-
-        if (!groupSnapshot.exists()) {
-            groupDocument.set(
-                hashMapOf(
-                    "name" to sanitizedGroupId,
-                    "createdBy" to userId,
-                    "createdAtEpochMillis" to timestamp,
-                    "status" to "active",
-                )
-            ).await()
-            groupDocument.collection(MEMBERS_COLLECTION).document(userId).set(
-                hashMapOf(
-                    "role" to "owner",
-                    "joinedAtEpochMillis" to timestamp,
-                    "canUploadImages" to true,
-                )
-            ).await()
-            return SharedGroup(sanitizedGroupId, sanitizedGroupId)
-        }
-
-        groupDocument.collection(MEMBERS_COLLECTION).document(userId).set(
-            hashMapOf(
-                "role" to "member",
-                "joinedAtEpochMillis" to timestamp,
-                "canUploadImages" to true,
-            )
-        ).await()
-        val groupName = groupSnapshot.getString("name") ?: sanitizedGroupId
-        return SharedGroup(sanitizedGroupId, groupName)
+        return ensureGroupMembership(userId = userId, groupId = groupId)
     }
 
     override fun observeSharedSightings(groupId: String): Flow<List<RemotePlateSighting>> = callbackFlow {
@@ -180,6 +156,10 @@ class FirebaseRemoteSyncDataSource(
 
         return sightings.map { sighting ->
             val remoteDocument = collection.document(sighting.remoteId ?: sighting.clientGeneratedId)
+            val existingSnapshot = sighting.remoteId?.let {
+                runCatching { remoteDocument.get().await() }.getOrNull()
+            }
+            val existingImageStoragePath = existingSnapshot?.getString("imageStoragePath")
             val updatedAtEpochMillis = System.currentTimeMillis()
             val uploadedImage = uploadImageIfNeeded(
                 groupId = session.groupId,
@@ -192,6 +172,19 @@ class FirebaseRemoteSyncDataSource(
                 )
             }
 
+            if (sighting.imageUri.isNullOrBlank() && !existingImageStoragePath.isNullOrBlank()) {
+                runCatching {
+                    Firebase.storage.reference.child(existingImageStoragePath).delete().await()
+                }
+            }
+
+            val imageStoragePath = when {
+                sighting.imageUri.isNullOrBlank() -> null
+                uploadedImage.storagePath != null -> uploadedImage.storagePath
+                uploadedImage.downloadUrl != null -> existingImageStoragePath
+                else -> null
+            }
+
             val payload = hashMapOf(
                 "clientGeneratedId" to sighting.clientGeneratedId,
                 "groupId" to session.groupId,
@@ -200,7 +193,7 @@ class FirebaseRemoteSyncDataSource(
                 "rawText" to sighting.rawText,
                 "imageUri" to uploadedImage.downloadUrl,
                 "imageDownloadUrl" to uploadedImage.downloadUrl,
-                "imageStoragePath" to uploadedImage.storagePath,
+                "imageStoragePath" to imageStoragePath,
                 "imageUploadWarning" to uploadedImage.warningMessage,
                 "latitude" to sighting.latitude,
                 "longitude" to sighting.longitude,
@@ -225,7 +218,7 @@ class FirebaseRemoteSyncDataSource(
                     groupId = session.groupId,
                     createdBy = session.userId,
                     imageUri = uploadedImage.downloadUrl,
-                    imageStoragePath = uploadedImage.storagePath,
+                    imageStoragePath = imageStoragePath,
                     updatedAtEpochMillis = updatedAtEpochMillis,
                     warningMessage = uploadedImage.warningMessage,
                 )
@@ -288,22 +281,103 @@ class FirebaseRemoteSyncDataSource(
         }
     }
 
+    private suspend fun ensureDefaultGroupMembership(userId: String): SharedGroup {
+        return ensureGroupMembership(
+            userId = userId,
+            groupId = BuildConfig.DEFAULT_FIRESTORE_GROUP_ID,
+        )
+    }
+
+    private suspend fun ensureGroupMembership(
+        userId: String,
+        groupId: String,
+    ): SharedGroup {
+        val sanitizedGroupId = sanitizeGroupId(groupId)
+        val groupDocument = Firebase.firestore.collection(GROUPS_COLLECTION).document(sanitizedGroupId)
+        val groupSnapshot = groupDocument.get().await()
+        val timestamp = System.currentTimeMillis()
+
+        if (!groupSnapshot.exists()) {
+            groupDocument.set(
+                hashMapOf(
+                    "name" to sanitizedGroupId,
+                    "createdBy" to userId,
+                    "createdAtEpochMillis" to timestamp,
+                    "status" to "active",
+                )
+            ).await()
+            groupDocument.collection(MEMBERS_COLLECTION).document(userId).set(
+                hashMapOf(
+                    "userId" to userId,
+                    "role" to "owner",
+                    "joinedAtEpochMillis" to timestamp,
+                    "canUploadImages" to true,
+                )
+            ).await()
+            return SharedGroup(sanitizedGroupId, sanitizedGroupId)
+        }
+
+        groupDocument.collection(MEMBERS_COLLECTION).document(userId).set(
+            hashMapOf(
+                "userId" to userId,
+                "role" to "member",
+                "joinedAtEpochMillis" to timestamp,
+                "canUploadImages" to true,
+            )
+        ).await()
+        val groupName = groupSnapshot.getString("name") ?: sanitizedGroupId
+        return SharedGroup(sanitizedGroupId, groupName)
+    }
+
     private suspend fun listGroupsForUser(userId: String): List<SharedGroup> {
-        val groupSnapshots = Firebase.firestore.collection(GROUPS_COLLECTION).get().await()
-        return groupSnapshots.documents.mapNotNull { groupDocument ->
-            val memberSnapshot = groupDocument.reference
-                .collection(MEMBERS_COLLECTION)
-                .document(userId)
-                .get()
-                .await()
-            if (!memberSnapshot.exists()) {
+        val firestore = Firebase.firestore
+        val groupsById = linkedMapOf<String, SharedGroup>()
+
+        val membershipSnapshots = firestore
+            .collectionGroup(MEMBERS_COLLECTION)
+            .whereEqualTo("userId", userId)
+            .get()
+            .await()
+
+        membershipSnapshots.documents.mapNotNull { memberDocument ->
+            val groupDocument = memberDocument.reference.parent.parent
+                ?: return@mapNotNull null
+            val groupSnapshot = runCatching {
+                groupDocument.get().await()
+            }.getOrNull()
+            if (groupSnapshot != null && !groupSnapshot.exists()) {
                 return@mapNotNull null
             }
             SharedGroup(
                 id = groupDocument.id,
-                name = groupDocument.getString("name") ?: groupDocument.id,
+                name = groupSnapshot?.getString("name") ?: groupDocument.id,
             )
-        }.sortedBy { it.name }
+        }.forEach { group ->
+            groupsById[group.id] = group
+        }
+
+        val legacyGroupSnapshots = firestore
+            .collection(GROUPS_COLLECTION)
+            .get()
+            .await()
+
+        legacyGroupSnapshots.documents.forEach { groupSnapshot ->
+            val legacyMembership = runCatching {
+                groupSnapshot.reference.collection(MEMBERS_COLLECTION).document(userId).get().await()
+            }.getOrNull() ?: return@forEach
+            if (!legacyMembership.exists()) {
+                return@forEach
+            }
+            groupsById.putIfAbsent(
+                groupSnapshot.id,
+                SharedGroup(
+                    id = groupSnapshot.id,
+                    name = groupSnapshot.getString("name") ?: groupSnapshot.id,
+                ),
+            )
+        }
+
+        return groupsById.values.sortedBy { it.name }
     }
 
     private fun sanitizeGroupId(groupId: String): String {

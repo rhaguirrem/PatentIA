@@ -59,8 +59,8 @@ val isReleaseSigningConfigured = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
-val appVersionCode = 3
-val appVersionName = "0.1.2"
+val appVersionCode = 4
+val appVersionName = "0.1.3"
 val apkArchiveDir = File("G:/Mi unidad/Projects/PatentIA")
 val releaseApkFileName = "patentia-installer-release.apk"
 val releaseApkArchiveFileName = "patentia-installer-release-$appVersionName.apk"
@@ -201,6 +201,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.navigation:navigation-compose:2.8.5")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")

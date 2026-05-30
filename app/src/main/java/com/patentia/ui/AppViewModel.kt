@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.patentia.data.PatentIADatabase
 import com.patentia.data.PlateSighting
 import com.patentia.data.SightingRepository
+import com.patentia.data.SyncPendingSightingsWorker
 import com.patentia.data.SyncDiagnostics
 import com.patentia.data.remote.FirebaseRemoteSyncDataSource
 import com.patentia.data.remote.NoOpRemoteSightingSyncDataSource
@@ -167,6 +168,7 @@ class AppViewModel(
 
     init {
         repository.startRealtimeSync(viewModelScope)
+        enqueuePendingSync()
     }
 
     private val filterInputs = combine(
@@ -354,6 +356,7 @@ class AppViewModel(
             lastRecognizedPlates.value = normalizedPlates
             val imageUri = pendingManualImageUri.value
             val source = pendingManualSource.value?.let { "${it}_manual" } ?: "manual_entry"
+            clearPendingManualImage(deleteImage = false)
 
             saveSightings(
                 recognizedPlates = normalizedPlates,
@@ -361,7 +364,6 @@ class AppViewModel(
                 imageUri = imageUri,
                 source = source,
             )
-            clearPendingManualImage(deleteImage = false)
         }
     }
 
@@ -389,6 +391,7 @@ class AppViewModel(
             }
 
             lastRecognizedPlates.value = normalizedPlates
+            clearPendingImageReview(deleteImage = false)
             saveSightings(
                 recognizedPlates = normalizedPlates,
                 rawText = review.rawText.ifBlank { normalizedPlates.joinToString(", ") },
@@ -396,7 +399,6 @@ class AppViewModel(
                 source = review.source,
                 locationOverride = review.selectedLocation,
             )
-            clearPendingImageReview(deleteImage = false)
         }
     }
 
@@ -501,10 +503,12 @@ class AppViewModel(
             capturedAtEpochMillis = System.currentTimeMillis(),
             source = source,
         )
-        repository.syncPendingSightings()
 
         selectedPlate.value = savedPlates.firstOrNull()
         val syncDiagnostics = repository.observeSyncDiagnostics().value
+        if (syncDiagnostics.isConfigured) {
+            enqueuePendingSync()
+        }
         statusMessage.value = buildString {
             append("Saved ")
             append(savedPlates.joinToString())
@@ -513,12 +517,14 @@ class AppViewModel(
             }
             when {
                 !syncDiagnostics.isConfigured -> append(" locally only")
-                syncDiagnostics.lastError != null -> append(" with cloud sync pending")
-                syncDiagnostics.lastWarning != null -> append(" with shared metadata only")
-                else -> append(" to group ${syncDiagnostics.activeGroupId ?: BuildConfig.DEFAULT_FIRESTORE_GROUP_ID}")
+                else -> append(" locally; cloud upload queued")
             }
         }
         return savedPlates
+    }
+
+    private fun enqueuePendingSync() {
+        SyncPendingSightingsWorker.enqueue(appContext)
     }
 
     private fun replacePendingManualImage(imageUri: String, source: String) {
@@ -631,6 +637,9 @@ class AppViewModel(
                 vehicleYear = lookup.vehicleYear,
                 vehicleColor = lookup.vehicleColor,
             )
+            if (repository.observeSyncDiagnostics().value.isConfigured) {
+                enqueuePendingSync()
+            }
             statusMessage.value = "Stored Volante o Maleta data for ${lookup.plateNumber}"
         }
     }
@@ -639,7 +648,7 @@ class AppViewModel(
         viewModelScope.launch {
             statusMessage.value = "Retrying cloud sync"
             repository.retrySighting(clientGeneratedId)
-            statusMessage.value = "Retry finished"
+            statusMessage.value = syncPendingNow(listOf(clientGeneratedId))
         }
     }
 
@@ -657,31 +666,61 @@ class AppViewModel(
             if (uiState.value.selectedPlate == currentPlateNumber) {
                 selectedPlate.value = normalizedPlate
             }
+            if (repository.observeSyncDiagnostics().value.isConfigured) {
+                enqueuePendingSync()
+            }
             statusMessage.value = "Plate updated to $normalizedPlate"
         }
     }
 
     fun retryPendingSync() {
         viewModelScope.launch {
-            statusMessage.value = "Retrying pending uploads"
-            repository.syncPendingSightings()
-            statusMessage.value = "Sync refresh finished"
+            statusMessage.value = "Syncing pending uploads"
+            statusMessage.value = syncPendingNow()
+        }
+    }
+
+    private suspend fun syncPendingNow(clientGeneratedIds: List<String>? = null): String {
+        return runCatching {
+            repository.syncPendingSightings(clientGeneratedIds)
+            val syncDiagnostics = repository.observeSyncDiagnostics().value
+            when {
+                syncDiagnostics.lastError != null -> syncDiagnostics.lastError
+                syncDiagnostics.pendingUploadCount > 0 -> {
+                    enqueuePendingSync()
+                    "Syncing ${syncDiagnostics.pendingUploadCount} pending"
+                }
+                else -> "Cloud sync complete"
+            }
+        }.getOrElse { exception ->
+            enqueuePendingSync()
+            exception.message ?: "Cloud sync retry failed"
         }
     }
 
     fun switchActiveGroup(groupId: String) {
         viewModelScope.launch {
             statusMessage.value = "Switching shared group"
-            repository.switchActiveGroup(groupId)
-            statusMessage.value = "Active group: $groupId"
+            runCatching {
+                repository.switchActiveGroup(groupId)
+            }.onSuccess {
+                statusMessage.value = "Active group: $groupId"
+            }.onFailure { exception ->
+                statusMessage.value = exception.message ?: "Could not switch shared group"
+            }
         }
     }
 
     fun joinOrCreateGroup(groupId: String) {
         viewModelScope.launch {
             statusMessage.value = "Joining shared group"
-            repository.joinOrCreateGroup(groupId)
-            statusMessage.value = "Group ready: $groupId"
+            runCatching {
+                repository.joinOrCreateGroup(groupId)
+            }.onSuccess {
+                statusMessage.value = "Group ready: $groupId"
+            }.onFailure { exception ->
+                statusMessage.value = exception.message ?: "Could not join shared group"
+            }
         }
     }
 

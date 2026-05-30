@@ -84,6 +84,28 @@ class SightingRepositoryTest {
     }
 
     @Test
+    fun `removeLocalImage marks synced sighting pending so remote image removal is shared`() = runBlocking {
+        val dao = FakePlateSightingDao(
+            listOf(
+                sighting(
+                    clientGeneratedId = "remote",
+                    imageUri = "https://example.com/image.jpg",
+                    remoteId = "remote-id",
+                    groupId = "group-a",
+                    syncState = PlateSyncState.SYNCED.name,
+                )
+            )
+        )
+        val repository = SightingRepository(dao, FakeRemoteSightingSyncDataSource(isConfigured = true))
+
+        repository.removeLocalImage(clientGeneratedId = "remote", imageUri = "https://example.com/image.jpg")
+
+        val sighting = dao.requireSighting("remote")
+        assertNull(sighting.imageUri)
+        assertEquals(PlateSyncState.PENDING_UPLOAD.name, sighting.syncState)
+    }
+
+    @Test
     fun `updatePlateLookup stores lookup fields for every matching sighting`() = runBlocking {
         val dao = FakePlateSightingDao(
             listOf(
@@ -142,9 +164,8 @@ class SightingRepositoryTest {
 
     private class FakeRemoteSightingSyncDataSource(
         private val deleteError: String? = null,
+        override val isConfigured: Boolean = deleteError != null,
     ) : RemoteSightingSyncDataSource {
-        override val isConfigured: Boolean = deleteError != null
-
         override suspend fun ensureSession(preferredGroupId: String?): RemoteSyncSession = RemoteSyncSession(
             isAvailable = true,
             providerLabel = "test",
@@ -257,10 +278,16 @@ class SightingRepositoryTest {
 
         override suspend fun clearImageUri(
             clientGeneratedId: String,
+            syncState: String,
             updatedAtEpochMillis: Long,
         ) {
             replace(clientGeneratedId) {
-                it.copy(imageUri = null, updatedAtEpochMillis = updatedAtEpochMillis)
+                it.copy(
+                    imageUri = null,
+                    syncState = syncState,
+                    syncError = null,
+                    updatedAtEpochMillis = updatedAtEpochMillis,
+                )
             }
         }
 

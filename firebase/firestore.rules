@@ -13,6 +13,23 @@ service cloud.firestore {
       return signedIn() && exists(memberDoc(groupId));
     }
 
+    function isSelf(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function canWriteOwnMembership(groupId, userId) {
+      return isSelf(userId)
+        && request.resource.data.joinedAtEpochMillis is int
+        && request.resource.data.canUploadImages is bool
+        && (
+          request.resource.data.role == 'member'
+          || (
+            request.resource.data.role == 'owner'
+            && get(/databases/$(database)/documents/groups/$(groupId)).data.createdBy == request.auth.uid
+          )
+        );
+    }
+
     function isGroupAdmin(groupId) {
       return isGroupMember(groupId) &&
         get(memberDoc(groupId)).data.role in ['owner', 'admin'];
@@ -23,13 +40,15 @@ service cloud.firestore {
     }
 
     match /groups/{groupId} {
-      allow read: if isGroupMember(groupId);
+      allow get: if signedIn();
+      allow list: if isGroupMember(groupId);
       allow create: if signedIn();
       allow update, delete: if isGroupAdmin(groupId);
 
       match /members/{userId} {
-        allow read: if isGroupMember(groupId);
-        allow create, update, delete: if isGroupAdmin(groupId);
+        allow read: if isGroupMember(groupId) || isSelf(userId);
+        allow create, update: if isGroupAdmin(groupId) || canWriteOwnMembership(groupId, userId);
+        allow delete: if isGroupAdmin(groupId) || isSelf(userId);
       }
 
       match /sightings/{sightingId} {
@@ -40,9 +59,10 @@ service cloud.firestore {
           && request.resource.data.plateNumber is string
           && request.resource.data.capturedAtEpochMillis is int;
         allow update: if isGroupMember(groupId)
-          && resource.data.createdBy == request.auth.uid
-          && request.resource.data.createdBy == resource.data.createdBy
-          && request.resource.data.groupId == resource.data.groupId;
+          && request.resource.data.groupId == resource.data.groupId
+          && request.resource.data.clientGeneratedId == resource.data.clientGeneratedId
+          && request.resource.data.plateNumber is string
+          && request.resource.data.capturedAtEpochMillis is int;
         allow delete: if resource.data.createdBy == request.auth.uid || isGroupAdmin(groupId);
       }
     }

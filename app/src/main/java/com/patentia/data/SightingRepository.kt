@@ -5,6 +5,7 @@ import com.patentia.data.remote.RemoteSightingSyncDataSource
 import com.patentia.data.remote.RemoteSyncSession
 import com.patentia.data.remote.toLocalEntity
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -97,10 +98,14 @@ class SightingRepository(
             return
         }
 
-        if (!activeSession.isAvailable) {
+        if (!activeSession.isAvailable || activeSession.groupId == null) {
             activeSession = remoteSyncDataSource.ensureSession(activeSession.groupId)
-            if (!activeSession.isAvailable || activeSession.groupId == null) {
+            if (!activeSession.isAvailable) {
                 refreshDiagnostics(lastError = activeSession.statusMessage)
+                return
+            }
+            if (activeSession.groupId == null) {
+                refreshDiagnostics(lastError = null, lastWarning = null)
                 return
             }
         }
@@ -170,7 +175,6 @@ class SightingRepository(
             updatedAtEpochMillis = System.currentTimeMillis(),
         )
         refreshDiagnostics(lastError = null, lastWarning = null)
-        syncPendingSightings(clientGeneratedIds = listOf(clientGeneratedId))
     }
 
     suspend fun updateSightingPlate(clientGeneratedId: String, plateNumber: String): String? {
@@ -196,9 +200,6 @@ class SightingRepository(
         )
 
         refreshDiagnostics(lastError = null, lastWarning = null)
-        if (remoteSyncDataSource.isConfigured && sighting.groupId != null) {
-            syncPendingSightings(clientGeneratedIds = listOf(clientGeneratedId))
-        }
         return null
     }
 
@@ -247,9 +248,6 @@ class SightingRepository(
         )
 
         refreshDiagnostics(lastError = null, lastWarning = null)
-        if (remoteSyncDataSource.isConfigured) {
-            syncPendingSightings(clientGeneratedIds = sightings.map { it.clientGeneratedId })
-        }
     }
 
     suspend fun switchActiveGroup(groupId: String) {
@@ -283,8 +281,14 @@ class SightingRepository(
         if (shouldDeleteLocalRecord) {
             dao.deleteByClientGeneratedId(clientGeneratedId)
         } else {
+            val nextSyncState = if (remoteSyncDataSource.isConfigured) {
+                PlateSyncState.PENDING_UPLOAD.name
+            } else {
+                PlateSyncState.LOCAL_ONLY.name
+            }
             dao.clearImageUri(
                 clientGeneratedId = clientGeneratedId,
+                syncState = nextSyncState,
                 updatedAtEpochMillis = System.currentTimeMillis(),
             )
         }
@@ -343,31 +347,48 @@ class SightingRepository(
         val scope = syncScope ?: return
         remoteObservationJob?.cancel()
         remoteObservationJob = scope.launch(Dispatchers.IO) {
-            activeSession = remoteSyncDataSource.ensureSession(activeSession.groupId)
-            activeSession = activeSession.copy(
-                availableGroups = remoteSyncDataSource.listGroups(activeSession),
-            )
-            refreshDiagnostics(
-                lastError = activeSession.statusMessage.takeIf { !activeSession.isAvailable },
-            )
+            val previousSession = activeSession
+            try {
+                activeSession = remoteSyncDataSource.ensureSession(activeSession.groupId)
+                activeSession = activeSession.copy(
+                    availableGroups = remoteSyncDataSource.listGroups(activeSession),
+                )
+                refreshDiagnostics(
+                    lastError = activeSession.statusMessage.takeIf { !activeSession.isAvailable },
+                )
 
-            val activeGroupId = activeSession.groupId
-            if (!activeSession.isAvailable || activeGroupId == null) {
-                return@launch
-            }
-
-            syncPendingSightings()
-            remoteSyncDataSource.observeSharedSightings(activeGroupId)
-                .collect { remoteSightings ->
-                    val existingSightings = dao.getByClientGeneratedIds(remoteSightings.map { it.clientGeneratedId })
-                        .associateBy { it.clientGeneratedId }
-                    dao.insertAll(
-                        remoteSightings.map { remoteSighting ->
-                            remoteSighting.toLocalEntity(existingSightings[remoteSighting.clientGeneratedId])
-                        }
-                    )
-                    refreshDiagnostics(lastSyncAtEpochMillis = System.currentTimeMillis())
+                val activeGroupId = activeSession.groupId
+                if (!activeSession.isAvailable) {
+                    return@launch
                 }
+                if (activeGroupId == null) {
+                    refreshDiagnostics(lastError = null, lastWarning = null)
+                    return@launch
+                }
+
+                syncPendingSightings()
+                remoteSyncDataSource.observeSharedSightings(activeGroupId)
+                    .collect { remoteSightings ->
+                        val existingSightings = dao.getByClientGeneratedIds(remoteSightings.map { it.clientGeneratedId })
+                            .associateBy { it.clientGeneratedId }
+                        dao.insertAll(
+                            remoteSightings.map { remoteSighting ->
+                                remoteSighting.toLocalEntity(existingSightings[remoteSighting.clientGeneratedId])
+                            }
+                        )
+                        refreshDiagnostics(lastSyncAtEpochMillis = System.currentTimeMillis())
+                    }
+            } catch (cancellationException: CancellationException) {
+                throw cancellationException
+            } catch (exception: Exception) {
+                activeSession = previousSession.copy(
+                    isAvailable = false,
+                    userId = null,
+                    availableGroups = emptyList(),
+                    statusMessage = exception.message ?: "Realtime sync is temporarily unavailable",
+                )
+                refreshDiagnostics(lastError = activeSession.statusMessage)
+            }
         }
     }
 

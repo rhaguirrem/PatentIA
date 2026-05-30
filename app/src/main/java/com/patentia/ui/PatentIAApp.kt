@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -158,12 +159,18 @@ private data class PlateLookupRequest(
     val provider: PlateLookupProvider,
 )
 
+private data class HistoryNavigationRequest(
+    val sightingId: String,
+    val imageUri: String?,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PatentIAApp(viewModel: AppViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     var selectedPanel by rememberSaveable { mutableStateOf(AppPanel.Camera) }
-    var pendingHistoryImageUri by remember { mutableStateOf<String?>(null) }
+    var pendingHistoryNavigation by remember { mutableStateOf<HistoryNavigationRequest?>(null) }
+    var pendingMapFocusSightingId by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var permissionRefreshToken by remember { mutableStateOf(0) }
@@ -282,9 +289,14 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 onRepeatedOnlyChange = viewModel::setRepeatedOnly,
                                 onTimeFilterChange = viewModel::setTimeFilter,
                                 onSelectPlate = viewModel::selectPlate,
+                                requestedFocusSightingId = pendingMapFocusSightingId,
+                                onFocusRequestConsumed = { pendingMapFocusSightingId = null },
                                 onOpenHistoryForPlate = { sighting ->
                                     viewModel.selectPlate(sighting.plateNumber)
-                                    pendingHistoryImageUri = sighting.imageUri?.takeIf { it.isNotBlank() }
+                                    pendingHistoryNavigation = HistoryNavigationRequest(
+                                        sightingId = sighting.clientGeneratedId,
+                                        imageUri = sighting.imageUri?.takeIf { it.isNotBlank() },
+                                    )
                                     selectedPanel = AppPanel.History
                                 },
                             )
@@ -306,8 +318,13 @@ fun PatentIAApp(viewModel: AppViewModel) {
                                 onEditSightingPlate = viewModel::updateSightingPlate,
                                 onRetrySighting = viewModel::retrySighting,
                                 onDeleteSighting = viewModel::deleteSighting,
-                                initialImageUri = pendingHistoryImageUri,
-                                onInitialImageConsumed = { pendingHistoryImageUri = null },
+                                onShowOnMap = { sighting ->
+                                    viewModel.selectPlate(sighting.plateNumber)
+                                    pendingMapFocusSightingId = sighting.clientGeneratedId
+                                    selectedPanel = AppPanel.Map
+                                },
+                                initialNavigation = pendingHistoryNavigation,
+                                onInitialNavigationConsumed = { pendingHistoryNavigation = null },
                             )
 
                             AppPanel.Config -> ConfigPanel(
@@ -1487,11 +1504,11 @@ private fun CameraCaptureCard(
     DisposableEffect(lifecycleOwner) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         val listener = Runnable {
-            val cameraProvider = providerFuture.get()
-            val preview = Preview.Builder().build().also {
-                it.surfaceProvider = previewView.surfaceProvider
-            }
             try {
+                val cameraProvider = providerFuture.get()
+                val preview = Preview.Builder().build().also {
+                    it.surfaceProvider = previewView.surfaceProvider
+                }
                 cameraProvider.unbindAll()
                 val camera = cameraProvider.bindToLifecycle(
                     lifecycleOwner,
@@ -1605,6 +1622,8 @@ private fun MapScreen(
     onRepeatedOnlyChange: (Boolean) -> Unit,
     onTimeFilterChange: (TimeFilter) -> Unit,
     onSelectPlate: (String?) -> Unit,
+    requestedFocusSightingId: String?,
+    onFocusRequestConsumed: () -> Unit,
     onOpenHistoryForPlate: (PlateSighting) -> Unit,
 ) {
     val mappedSightings = uiState.filteredSightings.filter { it.latitude != null && it.longitude != null }
@@ -1642,17 +1661,27 @@ private fun MapScreen(
         }
     }
 
-    LaunchedEffect(mappedSightings.firstOrNull()?.id, uiState.selectedPlate, currentLocation) {
+    LaunchedEffect(mappedSightings.firstOrNull()?.id, uiState.selectedPlate, currentLocation, requestedFocusSightingId) {
         selectedMapPreview = selectedMapPreview?.let { preview ->
             mappedSightings.firstOrNull { it.clientGeneratedId == preview.clientGeneratedId }
         }
-        val focus = selectedPath.lastOrNull() ?: mappedSightings.firstOrNull()
+        val requestedFocus = requestedFocusSightingId?.let { focusId ->
+            mappedSightings.firstOrNull { it.clientGeneratedId == focusId }
+        }
+        if (requestedFocus != null) {
+            onSelectPlate(requestedFocus.plateNumber)
+            selectedMapPreview = requestedFocus
+            controlsVisible = false
+        }
+        val focus = requestedFocus ?: selectedPath.lastOrNull() ?: mappedSightings.firstOrNull()
         if (focus != null) {
             val position = LatLng(
                 focus.latitude ?: return@LaunchedEffect,
                 focus.longitude ?: return@LaunchedEffect,
             )
-            val update = if (hasInitializedCamera) {
+            val update = if (requestedFocus != null) {
+                CameraUpdateFactory.newLatLngZoom(position, 16f)
+            } else if (hasInitializedCamera) {
                 CameraUpdateFactory.newLatLng(position)
             } else {
                 CameraUpdateFactory.newLatLngZoom(position, 12f)
@@ -1668,6 +1697,9 @@ private fun MapScreen(
             }
             cameraPositionState.move(update)
             hasInitializedCamera = true
+        }
+        if (requestedFocusSightingId != null) {
+            onFocusRequestConsumed()
         }
     }
 
@@ -1971,13 +2003,16 @@ private fun HistoryScreen(
     onEditSightingPlate: (String, String?, String) -> Unit,
     onRetrySighting: (String) -> Unit,
     onDeleteSighting: (String, String?) -> Unit,
-    initialImageUri: String?,
-    onInitialImageConsumed: () -> Unit,
+    onShowOnMap: (PlateSighting) -> Unit,
+    initialNavigation: HistoryNavigationRequest?,
+    onInitialNavigationConsumed: () -> Unit,
 ) {
     var fullScreenImageUri by remember { mutableStateOf<String?>(null) }
+    var pendingScrollTargetSightingId by remember { mutableStateOf<String?>(null) }
     var plateLookupRequest by remember { mutableStateOf<PlateLookupRequest?>(null) }
     var editingSighting by remember { mutableStateOf<PlateSighting?>(null) }
     var pendingDeleteSighting by remember { mutableStateOf<PlateSighting?>(null) }
+    val historyListState = rememberLazyListState()
     val plateHistorySummaries = remember(uiState.allSightings) {
         uiState.allSightings
             .groupBy { it.plateNumber }
@@ -1998,11 +2033,27 @@ private fun HistoryScreen(
         )
     }
 
-    LaunchedEffect(initialImageUri) {
-        if (!initialImageUri.isNullOrBlank()) {
-            fullScreenImageUri = initialImageUri
-            onInitialImageConsumed()
+    LaunchedEffect(initialNavigation) {
+        if (initialNavigation != null) {
+            pendingScrollTargetSightingId = initialNavigation.sightingId
+            if (!initialNavigation.imageUri.isNullOrBlank()) {
+                fullScreenImageUri = initialNavigation.imageUri
+            }
+            onInitialNavigationConsumed()
         }
+    }
+
+    LaunchedEffect(pendingScrollTargetSightingId, fullScreenImageUri, uiState.filteredSightings) {
+        val targetSightingId = pendingScrollTargetSightingId ?: return@LaunchedEffect
+        if (fullScreenImageUri != null) return@LaunchedEffect
+
+        val targetIndex = uiState.filteredSightings.indexOfFirst {
+            it.clientGeneratedId == targetSightingId
+        }
+        if (targetIndex >= 0) {
+            historyListState.animateScrollToItem(targetIndex)
+        }
+        pendingScrollTargetSightingId = null
     }
 
     Column(
@@ -2016,6 +2067,7 @@ private fun HistoryScreen(
             onTimeFilterChange = onTimeFilterChange,
         )
         LazyColumn(
+            state = historyListState,
             modifier = Modifier.weight(1f, fill = true),
             contentPadding = PaddingValues(bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -2037,6 +2089,15 @@ private fun HistoryScreen(
                     },
                     onRetry = { onRetrySighting(sighting.clientGeneratedId) },
                     onOpenImage = { imageUri -> fullScreenImageUri = imageUri },
+                    onShowOnMap = if (
+                        BuildConfig.IS_MAPS_API_KEY_CONFIGURED &&
+                        sighting.latitude != null &&
+                        sighting.longitude != null
+                    ) {
+                        { onShowOnMap(sighting) }
+                    } else {
+                        null
+                    },
                     onDeleteSighting = {
                         pendingDeleteSighting = sighting
                     },
@@ -2209,6 +2270,7 @@ private fun HistoryRow(
     onEditPlate: () -> Unit,
     onRetry: () -> Unit,
     onOpenImage: (String) -> Unit,
+    onShowOnMap: (() -> Unit)?,
     canDelete: Boolean = true,
     onDeleteSighting: () -> Unit,
 ) {
@@ -2324,6 +2386,14 @@ private fun HistoryRow(
                         onClick = onShareHistory,
                     ) {
                         Icon(Icons.Default.Share, contentDescription = "Share plate history")
+                    }
+                    onShowOnMap?.let { openMap ->
+                        IconButton(
+                            modifier = Modifier.size(40.dp),
+                            onClick = openMap,
+                        ) {
+                            Icon(Icons.Default.LocationOn, contentDescription = "Show sighting on map")
+                        }
                     }
                 }
                 if (sighting.syncState == PlateSyncState.SYNC_ERROR.name) {
@@ -2620,6 +2690,7 @@ private fun driverSummaryText(syncDiagnostics: SyncDiagnostics): String {
 private fun syncTitle(syncDiagnostics: SyncDiagnostics): String {
     return when {
         !syncDiagnostics.isConfigured -> "Stored on this device only"
+        syncDiagnostics.isSignedIn && syncDiagnostics.activeGroupId == null -> "Join a shared group"
         syncDiagnostics.lastError != null -> "Cloud sync needs retry"
         syncDiagnostics.lastWarning != null -> syncDiagnostics.lastWarning
         syncDiagnostics.pendingUploadCount > 0 -> "Sync in progress"
@@ -2631,6 +2702,16 @@ private fun syncTitle(syncDiagnostics: SyncDiagnostics): String {
 private fun syncSubtitle(syncDiagnostics: SyncDiagnostics): String {
     return when {
         !syncDiagnostics.isConfigured -> "Add google-services.json to enable Firebase Auth and Firestore."
+        syncDiagnostics.isSignedIn && syncDiagnostics.activeGroupId == null -> buildString {
+            append("Signed in as ")
+            append(syncDiagnostics.providerLabel)
+            append(". Enter a group code to start cloud sync")
+            if (syncDiagnostics.pendingUploadCount > 0) {
+                append(". Queued sightings stay local until a group is selected.")
+            } else {
+                append('.')
+            }
+        }
         syncDiagnostics.lastError != null -> "${syncDiagnostics.lastError} - queued items stay local until retry succeeds."
         syncDiagnostics.lastWarning != null -> "${syncDiagnostics.lastWarning} Firestore sharing still works, but remote devices will not see the photo until the storage issue is fixed."
         syncDiagnostics.pendingUploadCount > 0 -> "Queued sightings upload automatically when network and Firebase are available."
